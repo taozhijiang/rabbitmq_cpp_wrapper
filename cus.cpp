@@ -24,7 +24,7 @@ amqp_channel_t setupChannel(AMQP::RabbitMQHelper& mq) {
 
     uint32_t msg_cnt;
     uint32_t cons_cnt;
-    if(mq.declareQueue(t, "hello-queue", msg_cnt, cons_cnt, false, true, true, false) < 0){
+    if(mq.declareQueue(t, "hello-queue", msg_cnt, cons_cnt, false, true, false, false) < 0){
         std::cout << "Declare Queue Failed!" << std::endl;
         return -1;
     }
