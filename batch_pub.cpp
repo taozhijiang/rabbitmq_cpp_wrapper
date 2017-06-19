@@ -17,15 +17,13 @@ bool end = false;
 void* thread_run(void* arg) {
 
     AMQP::RabbitMQHelper mq("amqp://paybank:paybank@127.0.0.1:5672/paybank");
-    if (mq.connect() < 0) {
+    if (mq.doConnect() < 0) {
         std::cout << "Connect Error!" << std::endl;
         return NULL;
     }
 
-    amqp_channel_t t = mq.createChannel();
-    if (t > 0) {
-        std::cout << "Created channel " << t << std::endl;
-    } else {
+    AMQP::RabbitChannel ch = AMQP::RabbitChannel(mq);
+    if (ch.initChannel() < 0) {
         std::cout << "Create channel failed!" << std::endl;
         return NULL;
     }
@@ -43,7 +41,7 @@ void* thread_run(void* arg) {
         msg << "桃子最帅+:" << ::rand() % 1000000;
         ++ test_count;
 
-        if(mq.basicPublish(t, "hello-exchange", "*", 0, 0, msg.str()) < 0) {
+        if(ch.basicPublish("hello-exchange", "*", 0, 0, msg.str()) < 0) {
             std::cout << "publish error!" << std::endl;
             ::abort();
         }
