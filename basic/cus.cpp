@@ -63,9 +63,9 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    std::string retStr;
+    AMQP::RabbitMessage rabbitMsg;
     while (true) {
-        if(mq.basicConsumeMessage(retStr, NULL, 0) < 0) {
+        if(mq.basicConsumeMessage(rabbitMsg, NULL, 0) < 0) {
 retry_1:
             if (!mq.isConnectionOpen()) {
                 if (mq.doConnect() < 0) {
@@ -90,7 +90,7 @@ retry_2:
             }
         }
 
-        std::cout << "RECV:" <<  retStr << std::endl;
+        std::cout << "RECV:" <<  std::string((const char*)(rabbitMsg.content().bytes), rabbitMsg.content().len) << "]" << std::endl;
     }
 
     return 0;

@@ -36,6 +36,10 @@ public:
         safe_clear();
     }
 
+    amqp_bytes_t& content() {
+        return envelope.message.body;
+    }
+
     void safe_clear() {
         if (dirt) {
 
@@ -93,7 +97,7 @@ public:
         is_connected_ = false;
     }
 
-    int basicConsumeMessage(std::string &strRet,
+    int basicConsumeMessage(RabbitMessage& rabbit_msg,
                             struct timeval *timeout, int flags);
 
 private:
@@ -133,6 +137,7 @@ class RabbitChannel {
 public:
     RabbitChannel(RabbitMQHelper& mqHelper)
         :is_connected_(false), id_(-1),
+         is_publish_confirm_(false),
          mqHelper_(mqHelper) {
 
     }
@@ -156,6 +161,9 @@ public:
         is_connected_ = true;
         return 0;
     }
+
+    // 设置通道为PublisConfirm模式，这样每条消息落盘持久化之后，broker会返回一个ACK
+    int setConfirmSelect();
 
     // direct 直接根据路由键匹配
     // fanout 每条消息会广播到绑定到交换器上面的所有队列
@@ -220,7 +228,8 @@ public:
     int basicRecover(const std::string &consumer);
 
     // mandatory 如果消息无法路由到队列中去，是让broker返回消息无法路由信息，还是直接丢弃(false)
-    // immediate 针对消息无法路由，
+    // immediate 针对消息无法路由，发现对应的queue上没有消费者，那么这条消息不会放入队列中，即没有消费者的时候该消息会
+    //           返回给生产者
     int basicPublish(const std::string &exchange_name,
                      const std::string &routing_key, bool mandatory, bool immediate,
                      const std::string &message);
@@ -259,6 +268,8 @@ private:
     bool is_connected_;
     amqp_channel_t id_;
     RabbitMQHelper& mqHelper_;
+
+    bool is_publish_confirm_;
 };
 
 

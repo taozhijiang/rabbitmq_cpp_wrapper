@@ -67,6 +67,30 @@ int RabbitChannel::amqpErrorCheck(amqp_rpc_reply_t x, const char* context) {
     return retCode;
 }
 
+int RabbitChannel::setConfirmSelect(){
+    if (!isChannelOpen())
+        return -1;
+
+    amqp_confirm_select_t select = {};
+    select.nowait = false;
+
+    amqp_confirm_select_ok_t *r = amqp_confirm_select(mqHelper_.connection_, id_);
+
+    amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
+    if( amqpErrorCheck(res) < 0) {
+        return -1;
+    }
+
+    if (res.reply.id != AMQP_CONFIRM_SELECT_OK_METHOD) {
+        printf("expecting AMQP_CONFIRM_SELECT_OK_METHOD, but get reply.id: %d", res.reply.id);
+        return -1;
+    }
+
+    is_publish_confirm_ = true;
+    printf("Channel will work in confirm mode...");
+    return 0;
+}
+
 
 int RabbitChannel::declareExchange(const std::string &exchange_name,
                                    const std::string &exchange_type,
@@ -399,15 +423,41 @@ int RabbitChannel::basicPublish(const std::string &exchange_name,
                                  mandatory, immediate,
                                  NULL, message_bytes);
 
-    // todo ack recv
-
-
-    amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
     if (retCode < 0) {
+        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
         return -1;
     }
 
-    return 0;
+    if (!is_publish_confirm_) {
+        return 0;
+    }
+
+    // Publish Confirm mode
+    // - basic.ack - our channel is in confirm mode, messsage was 'dealt with' by the broker
+    // - basic.return then basic.ack - the message wasn't delievered, but was dealt with
+
+    amqp_frame_t frame;
+    if (AMQP_STATUS_OK != amqp_simple_wait_frame(mqHelper_.connection_, &frame)) {
+        printf("publish ok, but confirm may fail!");
+        return -1;
+    }
+    if (frame.payload.method.id == AMQP_BASIC_ACK_METHOD)
+        // Broker ACK message
+        return 0;
+    } else if(frame.payload.method.id == AMQP_BASIC_RETURN_METHOD) {
+        // read the return message
+        {
+            amqp_message_t message;
+            amqp_rpc_reply_t res = amqp_read_message(mqHelper_.connection_, frame.channel, &message, 0);
+            if (AMQP_RESPONSE_NORMAL == res.reply_type)
+                amqp_destroy_message(&message);
+        }
+        printf("basic.rturn called!");
+        return -1;
+    } else {
+        printf("Unexpeced method.id: %d", frame.payload.method.id);
+        return -1;
+    }
 }
 
 
@@ -530,16 +580,16 @@ int RabbitChannel::basicConsume(const std::string &queue,
 }
 
 
-int RabbitMQHelper::basicConsumeMessage(std::string &strRet,
+int RabbitMQHelper::basicConsumeMessage(RabbitMessage& rabbit_msg,
                                         struct timeval *timeout, int flags) {
 
     int retCode = 0;
     amqp_rpc_reply_t ret;
-    amqp_envelope_t envelope;
     amqp_frame_t frame;
 
     amqp_maybe_release_buffers(connection_);
-    ret = amqp_consume_message(connection_, &envelope, timeout/*blocking*/, 0);
+    rabbit_msg.safe_clear();
+    ret = amqp_consume_message(connection_, &rabbit_msg.envelope, timeout/*blocking*/, 0);
 
     // un-normal condition
     if (AMQP_RESPONSE_NORMAL != ret.reply_type) {
@@ -601,8 +651,8 @@ int RabbitMQHelper::basicConsumeMessage(std::string &strRet,
         }
 
     } else { //AMQP_RESPONSE_NORMAL
-        strRet = std::string((char *)envelope.message.body.bytes, envelope.message.body.len);
-        amqp_destroy_envelope(&envelope);
+
+        //
     }
 
     return 0;

@@ -34,6 +34,11 @@ amqp_channel_t setupChannel(AMQP::RabbitChannel& ch) {
         return -1;
     }
 
+    if (ch.basicConsume("hello-queue", "*", false/*no_local*/, false/*no_ack*/, false/*exclusive*/) < 0) {
+        std::cout << "BasicConosume Failed!" << std::endl;
+        return -1;
+    }
+
     return 0;
 }
 
@@ -60,7 +65,7 @@ int main(int argc, char* argv[]) {
 
     AMQP::RabbitMessage rabbitMsg;
     while (true) {
-        if(ch.basicGet(rabbitMsg, "hello-queue", true /*no_ack*/) < 0) {
+        if(mq.basicConsumeMessage(rabbitMsg, NULL, 0) < 0) {
 retry_1:
             if (!mq.isConnectionOpen()) {
                 if (mq.doConnect() < 0) {
@@ -83,13 +88,12 @@ retry_2:
                     goto retry_2;
                 }
             }
-
-            // no message, sleep
-            ::sleep(2);
-            std::cout << "no message ..." << std::endl;
-        } else {
-            std::cout << "RECV:" <<  std::string((const char*)(rabbitMsg.content().bytes), rabbitMsg.content().len) << "]" << std::endl;
         }
+
+        std::cout << "RECV:" <<  std::string((const char*)(rabbitMsg.content().bytes), rabbitMsg.content().len) << "]" << std::endl;
+        ch.basicAck(rabbitMsg.envelope.delivery_tag);
+        std::cout << "ACK:" << rabbitMsg.envelope.delivery_tag << std::endl;
+        rabbitMsg.safe_clear();
     }
 
     return 0;
