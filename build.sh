@@ -15,5 +15,6 @@ g++ -g -O0 -std=c++0x basic_get/get.cpp -o get RabbitMQ.o -lrabbitmq -lpthread |
 echo "confirm_ack"
 g++ -g -O0 -std=c++0x confirm_ack/pub_confirm.cpp -o pub_confirm RabbitMQ.o -lrabbitmq -lpthread || exit
 g++ -g -O0 -std=c++0x confirm_ack/cus_ack.cpp -o cus_ack RabbitMQ.o -lrabbitmq -lpthread || exit
+g++ -g -O0 -std=c++0x confirm_ack/cus_ack2.cpp -o cus_ack2 RabbitMQ.o -lrabbitmq -lpthread || exit
 
 echo "Done!"

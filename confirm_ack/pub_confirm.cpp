@@ -5,12 +5,14 @@
 #include <cstdint>
 #include <vector>
 #include <map>
+#include <sstream>
 
 #include "../RabbitMQ.h"
 
 
 int main(int argc, char* argv[]) {
-    std::cout << "GB" << std::endl;
+
+    ::srand((unsigned)::time(NULL));
 
     //AMQP::RabbitMQ mq("amqp://paybank:paybank@127.0.0.1:5672/paybank");
     // sudo rabbitmqctl set_permissions -p paybank paybank ".*" ".*" ".*"
@@ -30,9 +32,10 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    std::string msg("taozj最帅了");
+    std::stringstream msg;
+    msg << "桃子最帅+:" << ::rand() % 1000000;
 
-    if(ch.basicPublish("hello-exchange", "*", true/* mandatory */, false/* immediate */, msg) < 0) {
+    if(ch.basicPublish("hello-exchange", "*", true/* mandatory */, false/* immediate */, msg.str()) < 0) {
         std::cout << "publis error!" << std::endl;
         return -1;
     }

@@ -441,7 +441,7 @@ int RabbitChannel::basicPublish(const std::string &exchange_name,
         printf("publish ok, but confirm may fail!");
         return -1;
     }
-    if (frame.payload.method.id == AMQP_BASIC_ACK_METHOD)
+    if (frame.payload.method.id == AMQP_BASIC_ACK_METHOD) {
         // Broker ACK message
         return 0;
     } else if(frame.payload.method.id == AMQP_BASIC_RETURN_METHOD) {
