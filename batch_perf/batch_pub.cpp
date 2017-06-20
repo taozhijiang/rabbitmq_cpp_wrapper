@@ -8,7 +8,7 @@
 
 #include <sstream>
 
-#include "RabbitMQ.h"
+#include "../RabbitMQ.h"
 
 volatile unsigned long long test_count = 0;
 bool start = false;
@@ -41,7 +41,7 @@ void* thread_run(void* arg) {
         msg << "桃子最帅+:" << ::rand() % 1000000;
         ++ test_count;
 
-        if(ch.basicPublish("hello-exchange", "*", 0, 0, msg.str()) < 0) {
+        if(ch.basicPublish("hello-exchange", "*", false/*mandatory*/, false/*immediate*/, msg.str()) < 0) {
             std::cout << "publish error!" << std::endl;
             ::abort();
         }

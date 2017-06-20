@@ -6,7 +6,7 @@
 #include <vector>
 #include <map>
 
-#include "RabbitMQ.h"
+#include "../RabbitMQ.h"
 
 
 int main(int argc, char* argv[]) {
@@ -28,7 +28,7 @@ int main(int argc, char* argv[]) {
 
     std::string msg("taozj最帅了");
 
-    if(ch.basicPublish("hello-exchange", "*", 0, 0, msg) < 0) {
+    if(ch.basicPublish("hello-exchange", "*", false/* mandatory */, false/* immediate */, msg) < 0) {
         std::cout << "publis error!" << std::endl;
         return -1;
     }

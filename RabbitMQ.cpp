@@ -277,10 +277,29 @@ int RabbitChannel::basicAck(uint64_t delivery_tag, bool multiple /* = false */ )
     info.multiple = multiple;
 
     int retCode = amqp_basic_ack(mqHelper_.connection_, id_, info.delivery_tag, info.multiple);
-    return retCode;
+    if (retCode == 0)
+        return 0;
+
+    return -1;
 }
 
-int RabbitChannel::basicReject(uint64_t delivery_tag, bool requeue, bool multiple  /* = false */ ) {
+int RabbitChannel::basicReject(uint64_t delivery_tag, bool requeue) {
+    if (!isChannelOpen())
+        return -1;
+
+    amqp_basic_reject_t req;
+    req.delivery_tag = delivery_tag;
+    req.requeue = requeue;
+
+    int retCode = amqp_basic_reject(mqHelper_.connection_, id_, req.delivery_tag, req.requeue);
+    if (retCode == 0)
+        return 0;
+
+    return -1;
+}
+
+// 相比basicReject，可以批量的否决
+int RabbitChannel::basicNack(uint64_t delivery_tag, bool requeue, bool multiple  /* = false */ ) {
     if (!isChannelOpen())
         return -1;
 
@@ -290,7 +309,10 @@ int RabbitChannel::basicReject(uint64_t delivery_tag, bool requeue, bool multipl
     req.multiple = multiple;
 
     int retCode = amqp_basic_nack(mqHelper_.connection_, id_, req.delivery_tag, req.multiple, req.requeue);
-    return retCode;
+    if (retCode == 0)
+        return 0;
+
+    return -1;
 }
 
 
@@ -364,6 +386,8 @@ int RabbitChannel::basicRecover(const std::string &consumer) {
 int RabbitChannel::basicPublish(const std::string &exchange_name,
                                 const std::string &routing_key, bool mandatory, bool immediate,
                                 const std::string &message) {
+    if (!isChannelOpen())
+        return -1;
 
     amqp_bytes_t message_bytes;
     message_bytes.bytes = (void *)(message.c_str());
@@ -386,45 +410,96 @@ int RabbitChannel::basicPublish(const std::string &exchange_name,
     return 0;
 }
 
-#if 0
-int RabbitMQHelper::basicGet(amqp_channel_t channel,
-                             amqp_envelope_t* pEnvelope, const std::string &queue,
-                             bool no_ack) {
-    // m_impl->CheckIsConnected();
 
-    if (!pEnvelope) {
+int RabbitChannel::basicGet(RabbitMessage& rMessage, const std::string &queue,
+                            bool no_ack) {
+
+    if (!isChannelOpen())
         return -1;
-    }
+
+    rMessage.safe_clear();
+#if 0
+    //
+    amqp_rpc_reply_t res = amqp_read_message(mqHelper_.connection_, id_, &rMessage.envelope.message, 0);
+#endif
 
     amqp_basic_get_t get = {};
     get.queue = amqp_cstring_bytes(queue.c_str());
     get.no_ack = no_ack;
 
-    amqp_rpc_reply_t res = amqp_basic_get(connection_, channel, get.queue, get.no_ack);
-    if (AMQP_BASIC_GET_EMPTY_METHOD == res.payload.method.id) {
-        amqp_maybe_release_buffers_on_channel(connection_, channel);
+    amqp_rpc_reply_t res = amqp_basic_get(mqHelper_.connection_, id_, get.queue, get.no_ack);
+    if( amqpErrorCheck(res) < 0 ||
+        res.reply_type == AMQP_RESPONSE_NONE ||
+        AMQP_BASIC_GET_EMPTY_METHOD == res.reply.id) {
+        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
         return -1;
     }
 
-    amqp_basic_get_ok_t *get_ok =
-        (amqp_basic_get_ok_t *)res.payload.method.decoded;
-    uint64_t delivery_tag = get_ok->delivery_tag;
-    bool redelivered = (get_ok->redelivered == 0 ? false : true);
-    std::string exchange((char *)get_ok->exchange.bytes, get_ok->exchange.len);
-    std::string routing_key((char *)get_ok->routing_key.bytes,
-                          get_ok->routing_key.len);
+    if (res.reply.id != AMQP_BASIC_GET_OK_METHOD) {
+        printf("unexpeced reply.id: %d", res.reply.id);
+        return -1;
+    }
 
-    BasicMessage::ptr_t message = m_impl->ReadContent(channel);
+    amqp_basic_get_ok_t *get_ok = (amqp_basic_get_ok_t *)res.reply.decoded;
+    if (!get_ok) {
+        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+        return -1;
+    }
 
+    rMessage.safe_clear();
+    rMessage.envelope.delivery_tag = get_ok->delivery_tag;
+    rMessage.envelope.redelivered = get_ok->redelivered;
+    rMessage.envelope.exchange = amqp_bytes_malloc_dup(get_ok->exchange);   // not checked
+    rMessage.envelope.routing_key = amqp_bytes_malloc_dup(get_ok->routing_key);
+    rMessage.touch();
 
+    amqp_frame_t frame;
+    // check first frame header
+    amqp_maybe_release_buffers(mqHelper_.connection_);
+    if(amqp_simple_wait_frame(mqHelper_.connection_, &frame) != AMQP_STATUS_OK){
+        printf("wait for frame header error!");
+        return -1;
+    }
 
-    envelope = Envelope::Create(message, "", delivery_tag, exchange, redelivered,
-                              routing_key, channel);
+    if (frame.frame_type != AMQP_FRAME_HEADER){
+        printf("expecting AMQP_FRAME_HEADER, but get: %d", frame.frame_type);
+        return -1;
+    }
 
-    amqp_maybe_release_buffers_on_channel(connection_, channel);
+    rMessage.envelope.channel = frame.channel;
+    amqp_basic_properties_t * properties = reinterpret_cast<amqp_basic_properties_t *>(frame.payload.properties.decoded);
+    size_t body_size = static_cast<size_t>(frame.payload.properties.body_size);
+    size_t received_size = 0;
+    rMessage.envelope.message.body = amqp_bytes_malloc(body_size);  // already set body.len
+    if (!rMessage.envelope.message.body.bytes) {
+        rMessage.safe_clear();
+        return -1;
+    }
+
+    while (received_size < body_size) {
+        if(amqp_simple_wait_frame(mqHelper_.connection_, &frame) < 0){
+            printf("wait for frame header error!");
+            rMessage.safe_clear();
+            amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+            return -1;
+        }
+
+        if (frame.frame_type != AMQP_FRAME_BODY) {
+            printf("expecting AMQP_FRAME_BODY, but get: %d", frame.frame_type);
+            rMessage.safe_clear();
+            amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+            return -1;
+        }
+
+        // copy and store message
+        void *body_ptr = reinterpret_cast<char *>(rMessage.envelope.message.body.bytes) + received_size;
+        memcpy(body_ptr, frame.payload.body_fragment.bytes, frame.payload.body_fragment.len);
+        received_size += frame.payload.body_fragment.len;
+    }
+
+    amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
     return 0;
 }
-#endif
 
 
 int RabbitChannel::basicConsume(const std::string &queue,

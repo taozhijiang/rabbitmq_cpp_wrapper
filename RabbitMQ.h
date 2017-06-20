@@ -25,6 +25,45 @@ static const char* NULL_CTX = "[NULL_CTX]";
 
 class RabbitChannel;
 
+struct RabbitMessage {
+public:
+    RabbitMessage() :dirt(false) {
+        memset(&envelope, 0,  sizeof(envelope));
+        dirt = false;
+    }
+
+    ~RabbitMessage() {
+        safe_clear();
+    }
+
+    void safe_clear() {
+        if (dirt) {
+
+            // avoid use destroy_xxx
+            // for avoid the usage of amqp_poll
+            amqp_bytes_free(envelope.message.body);
+            amqp_bytes_free(envelope.routing_key);
+            amqp_bytes_free(envelope.exchange);
+            amqp_bytes_free(envelope.consumer_tag);
+
+            memset(&envelope, 0,  sizeof(envelope));
+
+            dirt = false;
+        }
+    }
+
+    void touch() {
+        dirt = true;
+    }
+
+public:
+    amqp_envelope_t envelope;
+private:
+    bool dirt;   // 如果envelope带有malloc的数据，就将此置位
+};
+
+
+
 class RabbitMQHelper {
 
     friend class RabbitChannel;
@@ -121,6 +160,7 @@ public:
     // direct 直接根据路由键匹配
     // fanout 每条消息会广播到绑定到交换器上面的所有队列
     // topic  路由键规则匹配，'.'分割各个字段，'*'字段通配符，'#'表示任意字段，
+    // durable 和Queue一样，虽然本身表示Broker重启时候能否重建Exchange和Queue，但也是消息持久化的前提
     int declareExchange(const std::string &exchange_name,
                         const std::string &exchange_type,
                         bool passive, bool durable, bool auto_delete);
@@ -164,7 +204,10 @@ public:
 
     // 在收到无法处理的消息，或者服务端发送消息过快的时候可以使用
     // requeue 确定该消息是否会重新入队列，还是被丢弃，此处需要根据dead letter来决定处理方式
-    int basicReject(uint64_t delivery_tag, bool requeue, bool multiple = false);
+    int basicReject(uint64_t delivery_tag, bool requeue);
+    // 相比basicReject，可以批量的否决
+    int basicNack(uint64_t delivery_tag, bool requeue, bool multiple  /* = false */ );
+
 
     // 取消一个consumer，broker此后就不会再向这个consumer_tag指定的consumer发送消息了
     int basicCancel(const std::string &consumer_tag);
@@ -183,11 +226,9 @@ public:
                      const std::string &message);
 
     // 获取单条消息，会进行订阅消息-获取消息-取消订阅，连续消费消息的话性能较低
-#if 0
-    int basicGet(amqp_channel_t channel,
-                 amqp_envelope_t* pEnvelope, const std::string &queue,
+
+    int basicGet(RabbitMessage& rMessage, const std::string &queue,
                  bool no_ack);
-#endif
 
     // consumer_tag是给callback的，用于区分各个消费者，同时该函数还会返回对应的consumer_tag供确认
     // no_ack 告知服务器不要expect ack/noack消息
