@@ -9,6 +9,21 @@
 
 #include "../RabbitMQ.h"
 
+bool setupChannel(AMQP::RabbitChannelPtr pChannel, void* pArg) {
+
+	if (!pChannel) {
+		std::cout << "nullptr Error!" << std::endl;
+		return false;
+	}
+
+    if (pChannel->setConfirmSelect() < 0) {
+        std::cout << "Setting publish confirm failed!" << std::endl;
+        return false;
+    }
+
+	return true;
+}
+
 
 int main(int argc, char* argv[]) {
 
@@ -22,20 +37,22 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    AMQP::RabbitChannel ch = AMQP::RabbitChannel(mq);
-    if (ch.initChannel() < 0) {
+	amqp_channel_t t = mq.createChannel();
+	if (t <= 0) {
         std::cout << "Create channel failed!" << std::endl;
         return -1;
     }
-    if (ch.setConfirmSelect() < 0) {
-        std::cout << "Setting publish confirm failed!" << std::endl;
+
+    if (mq.setupChannel(t, setupChannel, NULL) < 0) {
+        std::cout << "Setup channel failed!" << std::endl;
+		mq.freeChannel(t);
         return -1;
     }
 
     std::stringstream msg;
     msg << "桃子最帅+:" << ::rand() % 1000000;
 
-    if(ch.basicPublish("hello-exchange", "*", true/* mandatory */, false/* immediate */, msg.str()) < 0) {
+    if(mq.basicPublish(t, "hello-exchange", "*", true/* mandatory */, false/* immediate */, msg.str()) < 0) {
         std::cout << "publis error!" << std::endl;
         return -1;
     }

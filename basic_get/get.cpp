@@ -9,32 +9,36 @@
 #include "../RabbitMQ.h"
 
 
-amqp_channel_t setupChannel(AMQP::RabbitChannel& ch) {
+bool setupChannel(AMQP::RabbitChannelPtr pChannel, void* pArg) {
+	if (!pChannel) {
+		std::cout << "nullptr Error!" << std::endl;
+		return false;
+	}
 
-    if( ch.declareExchange("hello-exchange", "direct", false/*passive*/, true/*durable*/, false/*auto_delete*/) < 0) {
+    if(pChannel->declareExchange("hello-exchange", "direct", false/*passive*/, true/*durable*/, false/*auto_delete*/) < 0) {
         std::cout << "declareExchange Error!" << std::endl;
-        return -1;
+        return false;
     }
 
     uint32_t msg_cnt;
     uint32_t cons_cnt;
-    if(ch.declareQueue("hello-queue", msg_cnt, cons_cnt, false/*passive*/, true/*durable*/, false/*exclusive*/, false/*auto_delete*/) < 0){
+    if(pChannel->declareQueue("hello-queue", msg_cnt, cons_cnt, false/*passive*/, true/*durable*/, false/*exclusive*/, false/*auto_delete*/) < 0){
         std::cout << "Declare Queue Failed!" << std::endl;
-        return -1;
+        return false;
     }
     std::cout << ":" << msg_cnt << ", " << cons_cnt << std::endl;
 
-    if (ch.bindQueue("hello-queue", "hello-exchange", "*")) {
+    if (pChannel->bindQueue("hello-queue", "hello-exchange", "*")) {
         std::cout << "bindExchange Error!" << std::endl;
-        return -1;
+        return false;
     }
 
-    if (ch.basicQos(1, true) < 0) {
+    if (pChannel->basicQos(1, true) < 0) {
         std::cout << "basicQos Failed!" << std::endl;
-        return -1;
+        return false;
     }
 
-    return 0;
+    return true;
 }
 
 int main(int argc, char* argv[]) {
@@ -47,20 +51,21 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    AMQP::RabbitChannel ch = AMQP::RabbitChannel(mq);
-    if (ch.initChannel() < 0) {
+	amqp_channel_t t = mq.createChannel();
+	if (t <= 0) {
         std::cout << "Create channel failed!" << std::endl;
         return -1;
     }
 
-    if (setupChannel(ch) < 0) {
+    if (mq.setupChannel(t, setupChannel, NULL) < 0) {
         std::cout << "Setup channel failed!" << std::endl;
+		mq.freeChannel(t);
         return -1;
     }
 
     AMQP::RabbitMessage rabbitMsg;
     while (true) {
-        if(ch.basicGet(rabbitMsg, "hello-queue", true /*no_ack*/) < 0) {
+        if(mq.basicGet(t, rabbitMsg, "hello-queue", true /*no_ack*/) < 0) {
 retry_1:
             if (!mq.isConnectionOpen()) {
                 if (mq.doConnect() < 0) {
@@ -70,14 +75,17 @@ retry_1:
                 }
             }
 retry_2:
-            if (!ch.isChannelOpen()) {
-                if (ch.initChannel() < 0) {
+            if (!mq.isChannelOpen(t)) {
+				mq.freeChannel(t);
+				t = mq.createChannel();
+                if (t <= 0) {
                     std::cout << "Create channel failed!" << std::endl;
                     ::sleep(1);
                     goto retry_2;
                 }
 
-                if (setupChannel(ch) < 0) {
+                if (mq.setupChannel(t, setupChannel, NULL) < 0) {
+					mq.freeChannel(t);
                     std::cout << "Setup channel failed!" << std::endl;
                     ::sleep(1);
                     goto retry_2;

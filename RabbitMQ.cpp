@@ -8,11 +8,121 @@
 
 #include "RabbitMQ.h"
 
+
 namespace AMQP {
 
 // class RabbitChannel
 
+amqp_channel_t RabbitMQHelper::createChannel() {
+	amqp_channel_t t;
+	if ( (t = getChannelId()) <= 0)
+		return -1;
 
+	boost::shared_ptr<RabbitChannel> pChannel;
+	pChannel.reset(new RabbitChannel(t, *this));
+	if (!pChannel || pChannel->initChannel() < 0) {
+		freeChannelId(t);
+		return -1;
+	}
+
+	channels_[t] = pChannel;	// insert it!!
+	printf("created channel: %d", t);
+	return t;
+}
+
+int RabbitMQHelper::closeChannel(amqp_channel_t channel){
+    std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> >::iterator it;
+
+	it = channels_.find(channel);
+	if (it == channels_.end()) {
+		return -1;
+	}
+
+    it->second->closeChannel();
+    return 0;
+}
+
+int RabbitMQHelper::freeChannel(amqp_channel_t channel) {
+	std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> >::iterator it;
+
+	it = channels_.find(channel);
+	if (it == channels_.end()) {
+		return -1;
+	}
+
+	channels_.erase(channel); // auto call closeChannel()
+	freeChannelId(channel);
+
+	return 0;
+}
+
+bool RabbitMQHelper::isChannelOpen(amqp_channel_t channel) {
+    std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> >::iterator it;
+	it = channels_.find(channel);
+	if (it == channels_.end())
+        return false;
+
+    return it->second->isChannelOpen();
+}
+
+int RabbitMQHelper::setupChannel(amqp_channel_t channel, setupFunc func, void* pArg){
+	if (!isChannelOpen(channel))
+        return -1;
+
+    return func(channelInstance(channel), pArg);
+}
+
+int RabbitMQHelper::basicRecover(amqp_channel_t channel, const std::string &consumer) {
+	if (!isChannelOpen(channel))
+        return -1;
+
+    return channelInstance(channel)->basicRecover(consumer);
+}
+
+int RabbitMQHelper::basicPublish(amqp_channel_t channel, const std::string &exchange_name,
+                                 const std::string &routing_key, bool mandatory, bool immediate,
+                                 const std::string &message) {
+	if (!isChannelOpen(channel))
+        return -1;
+
+    return channelInstance(channel)->basicPublish(exchange_name, routing_key, mandatory, immediate, message);
+}
+
+int RabbitMQHelper::basicGet(amqp_channel_t channel, RabbitMessage& rMessage,
+                             const std::string &queue, bool no_ack) {
+    if (!isChannelOpen(channel))
+        return -1;
+
+    return channelInstance(channel)->basicGet(rMessage, queue, no_ack);
+}
+
+int RabbitMQHelper::basicAck(amqp_channel_t channel, uint64_t delivery_tag,
+                             bool multiple){
+    if (!isChannelOpen(channel))
+        return -1;
+
+    return channelInstance(channel)->basicAck(delivery_tag, multiple);
+}
+
+int RabbitMQHelper::basicReject(amqp_channel_t channel, uint64_t delivery_tag,
+                                bool requeue){
+    if (!isChannelOpen(channel))
+        return -1;
+
+    return channelInstance(channel)->basicReject(delivery_tag, requeue);
+}
+
+int RabbitMQHelper::basicNack(amqp_channel_t channel, uint64_t delivery_tag,
+                              bool requeue, bool multiple  /* = false */ ){
+    if (!isChannelOpen(channel))
+        return -1;
+
+    return channelInstance(channel)->basicNack(delivery_tag, requeue, multiple);
+}
+
+//
+// RabbitChannel
+//
 
 int RabbitChannel::amqpErrorCheck(amqp_rpc_reply_t x, const char* context) {
     int retCode = -1;
@@ -26,7 +136,7 @@ int RabbitChannel::amqpErrorCheck(amqp_rpc_reply_t x, const char* context) {
             fprintf(stderr, "%s missing RPC reply type!\n", context);
             break;
 
-    case AMQP_RESPONSE_LIBRARY_EXCEPTION:
+        case AMQP_RESPONSE_LIBRARY_EXCEPTION:
             // If we're getting this likely is the socket is already closed
             fprintf(stderr, "%s: %s\n", context, amqp_error_string2(x.library_error));
             break;
@@ -51,15 +161,16 @@ int RabbitChannel::amqpErrorCheck(amqp_rpc_reply_t x, const char* context) {
                             context,
                             m->reply_code,
                             (int) m->reply_text.len, (char *) m->reply_text.bytes);
+
+                    fprintf(stderr, "Close channel: %d", id_);
+                    closeChannel();
                     break;
-                    if (id_ != -1) {
-                        fprintf(stderr, "Close channel: %d", id_);
-                        closeChannel();
-                    }
                 }
-                default:
+
+                default: {
                     fprintf(stderr, "%s: unknown server error, method id 0x%08X\n", context, x.reply.id);
                     break;
+                }
             }
             break;
     }
@@ -105,7 +216,7 @@ int RabbitChannel::declareExchange(const std::string &exchange_name,
     declare.internal = false;
     declare.nowait = false;
 
-#if 1 //AMQP_VERSION_MINOR == 4
+#if 0 //AMQP_VERSION_MINOR == 4
     amqp_exchange_declare_ok_t *r = amqp_exchange_declare(mqHelper_.connection_, id_, declare.exchange,
                                                           declare.type, declare.passive, declare.durable, amqp_empty_table);
 #else
@@ -593,7 +704,9 @@ int RabbitMQHelper::basicConsumeMessage(RabbitMessage& rabbit_msg,
 
     // un-normal condition
     if (AMQP_RESPONSE_NORMAL != ret.reply_type) {
-        if (AMQP_RESPONSE_LIBRARY_EXCEPTION == ret.reply_type && AMQP_STATUS_UNEXPECTED_STATE == ret.library_error) {
+        if (AMQP_RESPONSE_LIBRARY_EXCEPTION == ret.reply_type &&
+            AMQP_STATUS_UNEXPECTED_STATE == ret.library_error) {
+
             if (AMQP_STATUS_OK != amqp_simple_wait_frame(connection_, &frame)) {
                 return -1;
             }
@@ -633,6 +746,8 @@ int RabbitMQHelper::basicConsumeMessage(RabbitMessage& rabbit_msg,
                        * to the previous channel
                        */
 
+                        fprintf(stderr, "Close other channel: %d", frame.channel);
+						closeChannel(frame.channel);
                         return -1;
 
                     case AMQP_CONNECTION_CLOSE_METHOD:
@@ -641,6 +756,9 @@ int RabbitMQHelper::basicConsumeMessage(RabbitMessage& rabbit_msg,
                        *
                        * In this case the whole connection must be restarted.
                        */
+
+                        fprintf(stderr, "Close connection");
+                        closeConnection();
                         return -1;
 
                     default:
@@ -666,6 +784,10 @@ bool RabbitMQHelper::doConnect() {
         printf("invalid argument!");
         return false;
     }
+
+    // when re-connect, free all channel
+    channel_ids_.clear();
+    channels_.clear();
 
     amqp_connection_info info;
     amqp_default_connection_info(&info);
@@ -700,6 +822,13 @@ bool RabbitMQHelper::doConnect() {
 
     printf("rabbitmq client connect to %s:%d/%s ok!", info.host, info.port, info.vhost);
     is_connected_ = true;
+
+	max_channel_id_ = amqp_get_channel_max(connection_);
+	if (max_channel_id_ == 0 || max_channel_id_ > 2048 ) {
+		max_channel_id_ = 2048;
+	}
+	printf("current we support maxium channel: %d", max_channel_id_);
+
     return true;
 
 error2:

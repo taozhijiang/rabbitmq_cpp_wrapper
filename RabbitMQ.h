@@ -9,8 +9,10 @@
 #include <string>
 #include <cstring>
 #include <cstdint>
-#include <vector>
+#include <set>
 #include <map>
+
+#include <boost/shared_ptr.hpp>
 
 // This object should not be shared among multi-threads
 
@@ -21,6 +23,9 @@ static const char* NULL_CTX = "[NULL_CTX]";
 /**
  * 消息持久化的三要素：
  * 消息的投递模式为持久、发送到持久化的交换器、到达持久化的队列
+ *
+ * 因为librabbitmq及时十分流行，但是其中还是使用了不少connect级别的全局信息，
+ * 所以建议一个connect中使用一个channel比较安全
  */
 
 class RabbitChannel;
@@ -67,6 +72,8 @@ private:
 };
 
 
+typedef boost::shared_ptr<RabbitChannel> RabbitChannelPtr;
+typedef bool (*setupFunc)(RabbitChannelPtr, void* pArg);
 
 class RabbitMQHelper {
 
@@ -77,14 +84,18 @@ public:
     RabbitMQHelper(const std::string& connect_uri, int frame_max = 131072 /*128K*/):
         connect_uri_(connect_uri), frame_max_(frame_max),
         is_connected_(false) {
-        ::memset(connect_ids_, 0, sizeof(connect_ids_));
+		channel_ids_.insert(0);
     }
 
     ~RabbitMQHelper() {
-        if (is_connected_) {
-            amqp_connection_close(connection_, AMQP_REPLY_SUCCESS);
-            amqp_destroy_connection(connection_);
-        }
+		// 我们必须在这里强迫先析构Channel，然后才能析构connection_，否则
+		// 顺序倒了会导致Channel析构的时候段错误 SIGSEGV
+		channels_.clear();
+
+		printf("Connection is closing...");
+
+		amqp_connection_close(connection_, AMQP_REPLY_SUCCESS);
+		amqp_destroy_connection(connection_);
     }
 
     bool doConnect();
@@ -93,18 +104,56 @@ public:
     }
 
     void closeConnection() {
-        amqp_connection_close(connection_, AMQP_REPLY_SUCCESS);
         is_connected_ = false;
     }
 
     int basicConsumeMessage(RabbitMessage& rabbit_msg,
                             struct timeval *timeout, int flags);
 
+	amqp_channel_t createChannel();
+
+	int setupChannel(amqp_channel_t channel, setupFunc func, void* pArg);
+
+	int closeChannel(amqp_channel_t channel);
+
+	int freeChannel(amqp_channel_t channel);
+
+
+	// channel wrapper
+	bool isChannelOpen(amqp_channel_t channel);
+
+    int basicRecover(amqp_channel_t channel, const std::string &consumer);
+
+    int basicPublish(amqp_channel_t channel, const std::string &exchange_name,
+                     const std::string &routing_key, bool mandatory, bool immediate,
+                     const std::string &message);
+
+    int basicGet(amqp_channel_t channel, RabbitMessage& rMessage,
+				 const std::string &queue, bool no_ack);
+
+    int basicAck(amqp_channel_t channel, uint64_t delivery_tag,
+				 bool multiple = false);
+
+    int basicReject(amqp_channel_t channel, uint64_t delivery_tag,
+					bool requeue);
+
+    int basicNack(amqp_channel_t channel, uint64_t delivery_tag,
+				  bool requeue, bool multiple  /* = false */ );
+
 private:
+	// 客户端不应该暴露RabbitChannel的指针、对象等信息，否则
+	// 智能指针对对象生命周期的控制会很混乱
+	RabbitChannelPtr channelInstance(amqp_channel_t channel) {
+		if (channels_.find(channel) == channels_.end())
+			return RabbitChannelPtr();	// nullptr
+
+		return channels_.at(channel);
+	}
+
     amqp_channel_t getChannelId() {
-        for (int i=2; (int)i<sizeof(connect_ids_); ++i) {
-            if (connect_ids_[i] == 0) {
-                connect_ids_[i] = 1;
+        for (int i=1; (int)i<max_channel_id_; ++i) {
+            if (channel_ids_.find(i) == channel_ids_.end()) {
+                channel_ids_.insert(i);
                 return i;
             }
         }
@@ -112,13 +161,10 @@ private:
     }
 
     int freeChannelId(amqp_channel_t channel) {
-        if (channel <= 0) {
-            if (connect_ids_[channel] != 0)
-                connect_ids_[channel] = 1;
-            else
-                printf("free already free: %d", channel);
-        }
-        return 0;
+		if (channel > 0 && channel < max_channel_id_)
+			channel_ids_.erase(channel);
+
+		return 0;
     }
 
 private:
@@ -128,15 +174,16 @@ private:
     amqp_connection_state_t connection_;
     bool is_connected_;
 
-    // 0 free, 1 used, first 1 reserved
-    char connect_ids_[2048];   // hardcode
+	amqp_channel_t max_channel_id_;
+	std::set<amqp_channel_t> channel_ids_;
+	std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> > channels_;
 };
 
 
 class RabbitChannel {
 public:
-    RabbitChannel(RabbitMQHelper& mqHelper)
-        :is_connected_(false), id_(-1),
+    RabbitChannel(amqp_channel_t channel, RabbitMQHelper& mqHelper)
+        :is_connected_(false), id_(channel),
          is_publish_confirm_(false),
          mqHelper_(mqHelper) {
 
@@ -144,12 +191,13 @@ public:
 
     ~RabbitChannel() {
         closeChannel();
-    }
+		printf("Channel: %d close...", id_);
+		amqp_channel_close(mqHelper_.connection_, id_, AMQP_REPLY_SUCCESS); // avoid multi call, only real destruct
+	}
 
     int initChannel() {
-        amqp_channel_t t = mqHelper_.getChannelId();
-        if (t <=0 ) {
-            printf("rabbitmq channel request error!");
+        if (id_ <= 0) {
+            printf("rabbitmq channel invalid id: %d", id_);
             return -1;
         }
         amqp_channel_open_ok_t *r = amqp_channel_open(mqHelper_.connection_, id_);
@@ -250,10 +298,9 @@ public:
         return is_connected_;
     }
 
+	// we just update our error status, but should not delete by ourself
     void closeChannel() {
-        mqHelper_.freeChannelId(id_);
         is_connected_ = false;
-        amqp_channel_close(mqHelper_.connection_, id_, AMQP_REPLY_SUCCESS); // reserved for RPC msg
     }
 
 private:

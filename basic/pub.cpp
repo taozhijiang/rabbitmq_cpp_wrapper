@@ -20,16 +20,16 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    AMQP::RabbitChannel ch = AMQP::RabbitChannel(mq);
-    if (ch.initChannel() < 0) {
+	amqp_channel_t t = mq.createChannel();
+	if (t <= 0) {
         std::cout << "Create channel failed!" << std::endl;
         return -1;
     }
 
     std::string msg("taozj最帅了");
 
-    if(ch.basicPublish("hello-exchange", "*", false/* mandatory */, false/* immediate */, msg) < 0) {
-        std::cout << "publis error!" << std::endl;
+    if(mq.basicPublish(t, "hello-exchange", "*", false/* mandatory */, false/* immediate */, msg) < 0) {
+        std::cout << "publish error!" << std::endl;
         return -1;
     }
 

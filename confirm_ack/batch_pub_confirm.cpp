@@ -14,6 +14,21 @@ volatile unsigned long long test_count = 0;
 bool start = false;
 bool end = false;
 
+bool setupChannel(AMQP::RabbitChannelPtr pChannel, void* pArg) {
+
+	if (!pChannel) {
+		std::cout << "nullptr Error!" << std::endl;
+		return false;
+	}
+
+    if (pChannel->setConfirmSelect() < 0) {
+        std::cout << "Setting publish confirm failed!" << std::endl;
+        return false;
+    }
+
+	return true;
+}
+
 void* thread_run(void* arg) {
 
     AMQP::RabbitMQHelper mq("amqp://paybank:paybank@127.0.0.1:5672/paybank");
@@ -28,6 +43,12 @@ void* thread_run(void* arg) {
         return NULL;
     }
 
+	if (mq.setupChannel(t, setupChannel, NULL) < 0) {
+		std::cout << "Setup channel failed!" << std::endl;
+		mq.freeChannel(t);
+		return NULL;
+	}
+
     do {
 
         if(!start) {
@@ -38,7 +59,7 @@ void* thread_run(void* arg) {
         if(end) break;
 
         std::stringstream msg;
-        msg << "2222+:" ; // << ::rand() % 1000000;
+        msg << "桃子最帅+:"; //;<< ::rand() % 1000000;
         ++ test_count;
 
         if(mq.basicPublish(t, "hello-exchange", "*", false/*mandatory*/, false/*immediate*/, msg.str()) < 0) {
