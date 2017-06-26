@@ -13,6 +13,7 @@
 #include <map>
 
 #include <boost/shared_ptr.hpp>
+#include <boost/function.hpp>
 
 // This object should not be shared among multi-threads
 
@@ -73,7 +74,7 @@ private:
 
 
 typedef boost::shared_ptr<RabbitChannel> RabbitChannelPtr;
-typedef bool (*setupFunc)(RabbitChannelPtr, void* pArg);
+typedef boost::function<bool (RabbitChannelPtr, void*)> RabbitChannelSetupFunc;
 
 class RabbitMQHelper {
 
@@ -112,7 +113,7 @@ public:
 
 	amqp_channel_t createChannel();
 
-	int setupChannel(amqp_channel_t channel, setupFunc func, void* pArg);
+	bool setupChannel(amqp_channel_t channel, RabbitChannelSetupFunc func, void* pArg);
 
 	int closeChannel(amqp_channel_t channel);
 
@@ -139,6 +140,8 @@ public:
 
     int basicNack(amqp_channel_t channel, uint64_t delivery_tag,
 				  bool requeue, bool multiple  /* = false */ );
+
+	std::string brokerVersion();
 
 private:
 	// 客户端不应该暴露RabbitChannel的指针、对象等信息，否则
@@ -184,8 +187,8 @@ class RabbitChannel {
 public:
     RabbitChannel(amqp_channel_t channel, RabbitMQHelper& mqHelper)
         :is_connected_(false), id_(channel),
-         is_publish_confirm_(false),
-         mqHelper_(mqHelper) {
+         mqHelper_(mqHelper),
+         is_publish_confirm_(false) {
 
     }
 
@@ -201,6 +204,8 @@ public:
             return -1;
         }
         amqp_channel_open_ok_t *r = amqp_channel_open(mqHelper_.connection_, id_);
+		(void)r;
+
         amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
         if( amqpErrorCheck(res) < 0) {
             printf("rabbitmq channel open error!");
