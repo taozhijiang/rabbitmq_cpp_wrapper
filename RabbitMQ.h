@@ -104,9 +104,7 @@ public:
         return is_connected_;
     }
 
-    void closeConnection() {
-        is_connected_ = false;
-    }
+    void closeConnection();
 
     int basicConsumeMessage(RabbitMessage& rabbit_msg,
                             struct timeval *timeout, int flags);
@@ -114,6 +112,10 @@ public:
 	amqp_channel_t createChannel();
 
 	bool setupChannel(amqp_channel_t channel, RabbitChannelSetupFunc func, void* pArg);
+
+	// channel <=0, 表示新建连接
+	int checkAndRepairChannel(amqp_channel_t& channel,
+                              RabbitChannelSetupFunc func, void* pArg);
 
 	int closeChannel(amqp_channel_t channel);
 

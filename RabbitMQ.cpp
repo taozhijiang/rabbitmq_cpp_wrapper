@@ -88,6 +88,47 @@ bool RabbitMQHelper::isChannelOpen(amqp_channel_t channel) {
     return it->second->isChannelOpen();
 }
 
+void RabbitMQHelper::closeConnection() {
+    is_connected_ = false;
+
+    // when connection close, close all channel.
+    std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> >::iterator it;
+    for (it=channels_.begin(); it!=channels_.end(); ++it) {
+        if (it->second)
+            it->second->closeChannel();
+    }
+}
+
+int RabbitMQHelper::checkAndRepairChannel(amqp_channel_t& channel,
+                                          RabbitChannelSetupFunc func, void* pArg){
+	if (isConnectionOpen() && isChannelOpen(channel))
+        return 0;
+
+    if (!isConnectionOpen()) {
+        if (!doConnect()) {
+            yk_api::log_error("Connect Failed!");
+            return -1;
+        }
+    }
+
+    if (!isChannelOpen(channel)) {
+        freeChannel(channel);
+        channel = createChannel();
+        if (channel <= 0) {
+            yk_api::log_error("Create Channel Failed!");
+            return -1;
+        }
+
+        if (!setupChannel(channel, func, pArg)) {
+            freeChannel(channel);
+            yk_api::log_error("Setup Channel Failed!");
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 bool RabbitMQHelper::setupChannel(amqp_channel_t channel, RabbitChannelSetupFunc func, void* pArg){
 	if (!isChannelOpen(channel))
         return false;
