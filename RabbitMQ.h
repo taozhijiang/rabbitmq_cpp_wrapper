@@ -15,6 +15,7 @@
 #include <boost/shared_ptr.hpp>
 #include <boost/function.hpp>
 
+
 // This object should not be shared among multi-threads
 
 namespace AMQP {
@@ -45,6 +46,10 @@ public:
     amqp_bytes_t& content() {
         return envelope.message.body;
     }
+
+	bool has_content() {
+		return !!(envelope.message.body.len);
+	}
 
     void safe_clear() {
         if (dirt) {

@@ -106,7 +106,7 @@ int RabbitMQHelper::checkAndRepairChannel(amqp_channel_t& channel,
 
     if (!isConnectionOpen()) {
         if (!doConnect()) {
-            yk_api::log_error("Connect Failed!");
+            printf("Connect Failed!");
             return -1;
         }
     }
@@ -281,7 +281,7 @@ int RabbitChannel::declareExchange(const std::string &exchange_name,
     declare.internal = false;
     declare.nowait = false;
 
-#if 0 //AMQP_VERSION_MINOR == 4
+#if 1 //AMQP_VERSION_MINOR == 4
     amqp_exchange_declare_ok_t *r = amqp_exchange_declare(mqHelper_.connection_, id_, declare.exchange,
                                                           declare.type, declare.passive, declare.durable, amqp_empty_table);
 #else
