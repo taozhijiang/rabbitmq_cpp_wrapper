@@ -94,14 +94,7 @@ public:
     }
 
     ~RabbitMQHelper() {
-		// 我们必须在这里强迫先析构Channel，然后才能析构connection_，否则
-		// 顺序倒了会导致Channel析构的时候段错误 SIGSEGV
-		channels_.clear();
-
-		printf("Connection is closing...");
-
-		amqp_connection_close(connection_, AMQP_REPLY_SUCCESS);
-		amqp_destroy_connection(connection_);
+		closeConnection();
     }
 
     bool doConnect();
@@ -201,8 +194,6 @@ public:
 
     ~RabbitChannel() {
         closeChannel();
-		printf("Channel: %d close...", id_);
-		amqp_channel_close(mqHelper_.connection_, id_, AMQP_REPLY_SUCCESS); // avoid multi call, only real destruct
 	}
 
     int initChannel() {
@@ -312,7 +303,12 @@ public:
 
 	// we just update our error status, but should not delete by ourself
     void closeChannel() {
-        is_connected_ = false;
+		if (!is_connected_)
+			return;
+
+		printf("Channel: %d close...", id_);
+		amqp_channel_close(mqHelper_.connection_, id_, AMQP_REPLY_SUCCESS); // avoid multi call, only real destruct
+		is_connected_ = false;
     }
 
 private:

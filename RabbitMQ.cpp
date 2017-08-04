@@ -89,14 +89,27 @@ bool RabbitMQHelper::isChannelOpen(amqp_channel_t channel) {
 }
 
 void RabbitMQHelper::closeConnection() {
-    is_connected_ = false;
 
+	if (!is_connected_)
+        return;
+
+    // 我们必须在这里强迫先析构Channel，然后才能析构connection_，否则
+    // 顺序倒了会导致Channel析构的时候段错误 SIGSEGV
+    //
     // when connection close, close all channel.
     std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> >::iterator it;
     for (it=channels_.begin(); it!=channels_.end(); ++it) {
         if (it->second)
             it->second->closeChannel();
     }
+
+	channels_.clear();
+    printf("Connection is closing...");
+
+	amqp_connection_close(connection_, AMQP_REPLY_SUCCESS);
+	amqp_destroy_connection(connection_);
+
+    is_connected_ = false;
 }
 
 int RabbitMQHelper::checkAndRepairChannel(amqp_channel_t& channel,
@@ -115,13 +128,13 @@ int RabbitMQHelper::checkAndRepairChannel(amqp_channel_t& channel,
         freeChannel(channel);
         channel = createChannel();
         if (channel <= 0) {
-            yk_api::log_error("Create Channel Failed!");
+            printf("Create Channel Failed!");
             return -1;
         }
 
         if (!setupChannel(channel, func, pArg)) {
             freeChannel(channel);
-            yk_api::log_error("Setup Channel Failed!");
+            printf("Setup Channel Failed!");
             return -1;
         }
     }
@@ -203,6 +216,7 @@ int RabbitChannel::amqpErrorCheck(amqp_rpc_reply_t x, const char* context) {
         case AMQP_RESPONSE_LIBRARY_EXCEPTION:
             // If we're getting this likely is the socket is already closed
             fprintf(stderr, "%s: %s\n", context, amqp_error_string2(x.library_error));
+            closeConnection();
             break;
 
         case AMQP_RESPONSE_SERVER_EXCEPTION:
@@ -233,6 +247,7 @@ int RabbitChannel::amqpErrorCheck(amqp_rpc_reply_t x, const char* context) {
 
                 default: {
                     fprintf(stderr, "%s: unknown server error, method id 0x%08X\n", context, x.reply.id);
+                    closeConnection();
                     break;
                 }
             }
@@ -492,6 +507,7 @@ int RabbitChannel::basicAck(uint64_t delivery_tag, bool multiple /* = false */ )
     if (retCode == 0)
         return 0;
 
+	closeConnection();
     return -1;
 }
 
@@ -507,6 +523,7 @@ int RabbitChannel::basicReject(uint64_t delivery_tag, bool requeue) {
     if (retCode == 0)
         return 0;
 
+    closeConnection();
     return -1;
 }
 
@@ -524,6 +541,7 @@ int RabbitChannel::basicNack(uint64_t delivery_tag, bool requeue, bool multiple 
     if (retCode == 0)
         return 0;
 
+    closeConnection();
     return -1;
 }
 
@@ -611,15 +629,19 @@ int RabbitChannel::basicPublish(const std::string &exchange_name,
     message_bytes.bytes = (void *)(message.c_str());
     message_bytes.len = message.size();
 
+    amqp_basic_properties_t props;
+    props._flags = AMQP_BASIC_DELIVERY_MODE_FLAG;
+    props.delivery_mode = 2; /* persistent delivery mode */
+
     int retCode = amqp_basic_publish(mqHelper_.connection_, id_,
                                  amqp_cstring_bytes(exchange_name.c_str()),
                                  amqp_cstring_bytes(routing_key.c_str()),
                                  mandatory, immediate,
-                                 NULL, message_bytes);
+                                 &props, message_bytes);
 
     if (retCode < 0) {
         amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
-        return -1;
+		goto connection_err;
     }
 
     if (!is_publish_confirm_) {
@@ -633,12 +655,14 @@ int RabbitChannel::basicPublish(const std::string &exchange_name,
     amqp_frame_t frame;
     if (AMQP_STATUS_OK != amqp_simple_wait_frame(mqHelper_.connection_, &frame)) {
         printf("publish ok, but confirm may fail!");
-        return -1;
+		goto connection_err;
     }
     if (frame.payload.method.id == AMQP_BASIC_ACK_METHOD) {
         // Broker ACK message
         return 0;
     } else if(frame.payload.method.id == AMQP_BASIC_RETURN_METHOD) {
+        /* Message was published with mandatory = true and the message
+         * wasn't routed to a queue, so the message is returned */
         // read the return message
         {
             amqp_message_t message;
@@ -646,12 +670,16 @@ int RabbitChannel::basicPublish(const std::string &exchange_name,
             if (AMQP_RESPONSE_NORMAL == res.reply_type)
                 amqp_destroy_message(&message);
         }
-        printf("basic.rturn called!");
-        return -1;
+        printf("basic.return called!");
+		goto connection_err;
     } else {
         printf("Unexpeced method.id: %d", frame.payload.method.id);
-        return -1;
+		goto connection_err;
     }
+
+connection_err:
+	closeConnection();
+    return -1;
 }
 
 
