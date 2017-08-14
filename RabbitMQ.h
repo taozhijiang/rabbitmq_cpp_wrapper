@@ -9,6 +9,7 @@
 #include <string>
 #include <cstring>
 #include <cstdint>
+#include <vector>
 #include <set>
 #include <map>
 
@@ -52,19 +53,13 @@ public:
 	}
 
     void safe_clear() {
+
         if (dirt) {
-
-            // avoid use destroy_xxx
-            // for avoid the usage of amqp_poll
-            amqp_bytes_free(envelope.message.body);
-            amqp_bytes_free(envelope.routing_key);
-            amqp_bytes_free(envelope.exchange);
-            amqp_bytes_free(envelope.consumer_tag);
-
-            memset(&envelope, 0,  sizeof(envelope));
-
+            amqp_destroy_envelope(&envelope);
             dirt = false;
         }
+
+        memset(&envelope, 0, sizeof(envelope));
     }
 
     void touch() {
@@ -87,10 +82,21 @@ class RabbitMQHelper {
 
 public:
     // amqp://user:passwd@host:5672/vhostname
-    RabbitMQHelper(const std::string& connect_uri, int frame_max = 131072 /*128K*/):
-        connect_uri_(connect_uri), frame_max_(frame_max),
+    explicit RabbitMQHelper(const std::string& connect_uri, int frame_max = 131072 /*128K*/):
+        connect_uris_(), frame_max_(frame_max),
+        is_connected_(false) {
+        connect_uris_.push_back(connect_uri);
+		channel_ids_.insert(0);
+
+        yk_api::log_trace("current connect_uri size: %lu", connect_uris_.size());
+    }
+
+    explicit RabbitMQHelper(const std::vector<std::string>& connect_uris, int frame_max = 131072 /*128K*/):
+        connect_uris_(connect_uris), frame_max_(frame_max),
         is_connected_(false) {
 		channel_ids_.insert(0);
+
+        yk_api::log_trace("current connect_uri size: %lu", connect_uris_.size());
     }
 
     ~RabbitMQHelper() {
@@ -129,7 +135,7 @@ public:
                      const std::string &routing_key, bool mandatory, bool immediate,
                      const std::string &message);
 
-    int basicGet(amqp_channel_t channel, RabbitMessage& rMessage,
+    int basicGet(amqp_channel_t channel, RabbitMessage& rabbit_msg,
 				 const std::string &queue, bool no_ack);
 
     int basicAck(amqp_channel_t channel, uint64_t delivery_tag,
@@ -171,7 +177,7 @@ private:
     }
 
 private:
-    std::string connect_uri_;
+    std::vector<std::string> connect_uris_;
     int frame_max_;
 
     amqp_connection_state_t connection_;
@@ -287,7 +293,7 @@ public:
 
     // 获取单条消息，会进行订阅消息-获取消息-取消订阅，连续消费消息的话性能较低
 
-    int basicGet(RabbitMessage& rMessage, const std::string &queue,
+    int basicGet(RabbitMessage& rabbit_msg, const std::string &queue,
                  bool no_ack);
 
     // consumer_tag是给callback的，用于区分各个消费者，同时该函数还会返回对应的consumer_tag供确认

@@ -11,6 +11,13 @@
 
 namespace AMQP {
 
+static int amqp_bytes_malloc_dup_failed(amqp_bytes_t bytes) {
+    if (bytes.len != 0 && bytes.bytes == NULL) {
+        return 1;
+    }
+    return 0;
+}
+
 std::string RabbitMQHelper::brokerVersion() {
 
     const amqp_table_t *properties = amqp_get_server_properties(connection_);
@@ -38,8 +45,10 @@ std::string RabbitMQHelper::brokerVersion() {
 
 amqp_channel_t RabbitMQHelper::createChannel() {
 	amqp_channel_t t;
-	if ( (t = getChannelId()) <= 0)
+	if ( (t = getChannelId()) <= 0) {
+		printf("getChannelId failed!");
 		return -1;
+	}
 
 	boost::shared_ptr<RabbitChannel> pChannel;
 	pChannel.reset(new RabbitChannel(t, *this));
@@ -165,12 +174,12 @@ int RabbitMQHelper::basicPublish(amqp_channel_t channel, const std::string &exch
     return channelInstance(channel)->basicPublish(exchange_name, routing_key, mandatory, immediate, message);
 }
 
-int RabbitMQHelper::basicGet(amqp_channel_t channel, RabbitMessage& rMessage,
+int RabbitMQHelper::basicGet(amqp_channel_t channel, RabbitMessage& rabbit_msg,
                              const std::string &queue, bool no_ack) {
     if (!isChannelOpen(channel))
         return -1;
 
-    return channelInstance(channel)->basicGet(rMessage, queue, no_ack);
+    return channelInstance(channel)->basicGet(rabbit_msg, queue, no_ack);
 }
 
 int RabbitMQHelper::basicAck(amqp_channel_t channel, uint64_t delivery_tag,
@@ -683,17 +692,22 @@ connection_err:
 }
 
 
-int RabbitChannel::basicGet(RabbitMessage& rMessage, const std::string &queue,
+int RabbitChannel::basicGet(RabbitMessage& rabbit_msg, const std::string &queue,
                             bool no_ack) {
 
     if (!isChannelOpen())
         return -1;
 
-    rMessage.safe_clear();
+    rabbit_msg.safe_clear();
 #if 0
     //
-    amqp_rpc_reply_t res = amqp_read_message(mqHelper_.connection_, id_, &rMessage.envelope.message, 0);
+    amqp_rpc_reply_t res = amqp_read_message(mqHelper_.connection_, id_, &rabbit_msg.envelope.message, 0);
 #endif
+
+    size_t received_size = 0;
+    size_t body_size = 0;
+    amqp_basic_properties_t * properties = NULL;
+    amqp_basic_get_ok_t * get_ok = NULL;
 
     amqp_basic_get_t get = {};
     get.queue = amqp_cstring_bytes(queue.c_str());
@@ -704,75 +718,94 @@ int RabbitChannel::basicGet(RabbitMessage& rMessage, const std::string &queue,
         res.reply_type == AMQP_RESPONSE_NONE ||
         AMQP_BASIC_GET_EMPTY_METHOD == res.reply.id) {
         amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
-        return -1;
+        goto error_out1;
     }
 
     if (res.reply.id != AMQP_BASIC_GET_OK_METHOD) {
         printf("unexpeced reply.id: %d", res.reply.id);
-        return -1;
+        goto error_out1;
     }
 
-    amqp_basic_get_ok_t *get_ok = (amqp_basic_get_ok_t *)res.reply.decoded;
+    get_ok = (amqp_basic_get_ok_t *)res.reply.decoded;
     if (!get_ok) {
         amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
-        return -1;
+        goto error_out1;
     }
 
-    rMessage.safe_clear();
-    rMessage.envelope.delivery_tag = get_ok->delivery_tag;
-    rMessage.envelope.redelivered = get_ok->redelivered;
-    rMessage.envelope.exchange = amqp_bytes_malloc_dup(get_ok->exchange);   // not checked
-    rMessage.envelope.routing_key = amqp_bytes_malloc_dup(get_ok->routing_key);
-    rMessage.touch();
+    rabbit_msg.safe_clear();
+    rabbit_msg.envelope.delivery_tag = get_ok->delivery_tag;
+    rabbit_msg.envelope.redelivered = get_ok->redelivered;
+    rabbit_msg.envelope.exchange = amqp_bytes_malloc_dup(get_ok->exchange);
+    rabbit_msg.envelope.routing_key = amqp_bytes_malloc_dup(get_ok->routing_key);
+
+    if (amqp_bytes_malloc_dup_failed(rabbit_msg.envelope.exchange) ||
+        amqp_bytes_malloc_dup_failed(rabbit_msg.envelope.routing_key)) {
+        yk_api::log_error("malloc failed!");
+        goto error_out2;
+    }
 
     amqp_frame_t frame;
     // check first frame header
     amqp_maybe_release_buffers(mqHelper_.connection_);
     if(amqp_simple_wait_frame(mqHelper_.connection_, &frame) != AMQP_STATUS_OK){
         printf("wait for frame header error!");
-        return -1;
+        goto error_out2;
     }
 
     if (frame.frame_type != AMQP_FRAME_HEADER){
         printf("expecting AMQP_FRAME_HEADER, but get: %d", frame.frame_type);
-        return -1;
+        goto error_out2;
     }
 
-    rMessage.envelope.channel = frame.channel;
-    amqp_basic_properties_t * properties = reinterpret_cast<amqp_basic_properties_t *>(frame.payload.properties.decoded);
+    rabbit_msg.envelope.channel = frame.channel;
+    init_amqp_pool(&rabbit_msg.envelope.message.pool, 1); // init but not used
+    properties = reinterpret_cast<amqp_basic_properties_t *>(frame.payload.properties.decoded);
     (void)properties;
 
-    size_t body_size = static_cast<size_t>(frame.payload.properties.body_size);
-    size_t received_size = 0;
-    rMessage.envelope.message.body = amqp_bytes_malloc(body_size);  // already set body.len
-    if (!rMessage.envelope.message.body.bytes) {
-        rMessage.safe_clear();
-        return -1;
+    received_size = 0;
+    body_size = static_cast<size_t>(frame.payload.properties.body_size);
+    if (0 == frame.payload.properties.body_size) {
+        rabbit_msg.envelope.message.body = amqp_empty_bytes;
+    } else {
+        rabbit_msg.envelope.message.body = amqp_bytes_malloc(body_size);  // already set body.len
+        if (!rabbit_msg.envelope.message.body.bytes) {
+            printf("malloc for message body failed!");
+            goto error_out3;
+        }
     }
 
     while (received_size < body_size) {
         if(amqp_simple_wait_frame(mqHelper_.connection_, &frame) < 0){
             printf("wait for frame header error!");
-            rMessage.safe_clear();
-            amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
-            return -1;
+            goto error_out3;
         }
 
         if (frame.frame_type != AMQP_FRAME_BODY) {
             printf("expecting AMQP_FRAME_BODY, but get: %d", frame.frame_type);
-            rMessage.safe_clear();
-            amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
-            return -1;
+            goto error_out3;
         }
 
         // copy and store message
-        void *body_ptr = reinterpret_cast<char *>(rMessage.envelope.message.body.bytes) + received_size;
+        void *body_ptr = reinterpret_cast<char *>(rabbit_msg.envelope.message.body.bytes) + received_size;
         memcpy(body_ptr, frame.payload.body_fragment.bytes, frame.payload.body_fragment.len);
         received_size += frame.payload.body_fragment.len;
     }
 
+    rabbit_msg.touch();
     amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
     return 0;
+
+error_out3:
+    empty_amqp_pool(&rabbit_msg.envelope.message.pool);
+
+error_out2:
+    amqp_bytes_free(rabbit_msg.envelope.message.body); // safe
+    amqp_bytes_free(rabbit_msg.envelope.routing_key);
+    amqp_bytes_free(rabbit_msg.envelope.exchange);
+
+error_out1:
+    amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+    return -1;
 }
 
 
@@ -884,7 +917,7 @@ int RabbitMQHelper::basicConsumeMessage(RabbitMessage& rabbit_msg,
 
     } else { //AMQP_RESPONSE_NORMAL
 
-        //
+        rabbit_msg.touch();
     }
 
     return 0;
@@ -894,7 +927,7 @@ int RabbitMQHelper::basicConsumeMessage(RabbitMessage& rabbit_msg,
 
 bool RabbitMQHelper::doConnect() {
 
-    if (connect_uri_.empty() || frame_max_ <= 0) {
+    if (connect_uris_.empty() || frame_max_ <= 0) {
         printf("invalid argument!");
         return false;
     }
@@ -905,50 +938,55 @@ bool RabbitMQHelper::doConnect() {
 
     amqp_connection_info info;
     amqp_default_connection_info(&info);
-    char uri[2048] = {0, };
-    strncpy(uri, connect_uri_.c_str(), sizeof(uri));
-    if (amqp_parse_url(uri, &info) != 0) {
-        printf("prase connect_uri failed: %s", uri);
-        return false;
+
+    std::vector<std::string>::const_iterator it;
+    for (it = connect_uris_.cbegin(); it != connect_uris_.cend(); ++it){
+
+		char uri[2048] = {0, };
+		strncpy(uri, it->c_str(), sizeof(uri));
+		
+		if (amqp_parse_url(uri, &info) != 0) {
+				printf("prase connect_uri failed: %s", uri);
+				continue;
+		}
+
+		connection_ = amqp_new_connection();
+		if (!connection_) {
+				printf("rabbitmq new connect error!");
+				continue;
+		}
+
+		amqp_socket_t *socket = amqp_tcp_socket_new(connection_);
+		int sock = amqp_socket_open(socket, info.host, info.port);
+		if (sock < 0) {
+				printf("rabbitmq socket open error!");
+				amqp_destroy_connection(connection_);
+				continue;
+		}
+
+		amqp_rpc_reply_t res = amqp_login(connection_, info.vhost, 0, frame_max_, 0,
+								 AMQP_SASL_METHOD_PLAIN, info.user, info.password);
+		if (AMQP_RESPONSE_NORMAL != res.reply_type) {
+			printf("rabbitmq login error!");
+			amqp_connection_close(connection_, AMQP_REPLY_SUCCESS);
+			amqp_destroy_connection(connection_);
+			continue;
+		}
+
+		printf("rabbitmq client connect to %s:%d/%s ok!", info.host, info.port, info.vhost);
+		is_connected_ = true;
+
+		max_channel_id_ = amqp_get_channel_max(connection_);
+		if (max_channel_id_ == 0 || max_channel_id_ > 2048 ) {
+			max_channel_id_ = 2048;
+		}
+		printf("current we support maxium channel: %d", max_channel_id_);
+
+		return true;
     }
 
-    connection_ = amqp_new_connection();
-    if (!connection_) {
-        printf("rabbitmq new connect error!");
-        return false;
-    }
+    yk_api::log_error("We've tried %lu connection_uri, but failed!", connect_uris_.size());
 
-    amqp_socket_t *socket = amqp_tcp_socket_new(connection_);
-    int sock = amqp_socket_open(socket, info.host, info.port);
-    if (sock < 0) {
-        printf("rabbitmq socket open error!");
-        goto error1;
-    }
-
-    {
-        amqp_rpc_reply_t res = amqp_login(connection_, info.vhost, 0, frame_max_, 0,
-                             AMQP_SASL_METHOD_PLAIN, info.user, info.password);
-        if (AMQP_RESPONSE_NORMAL != res.reply_type) {
-            printf("rabbitmq login error!");
-            goto error2;
-        }
-    }
-
-    printf("rabbitmq client connect to %s:%d/%s ok!", info.host, info.port, info.vhost);
-    is_connected_ = true;
-
-	max_channel_id_ = amqp_get_channel_max(connection_);
-	if (max_channel_id_ == 0 || max_channel_id_ > 2048 ) {
-		max_channel_id_ = 2048;
-	}
-	printf("current we support maxium channel: %d", max_channel_id_);
-
-    return true;
-
-error2:
-    amqp_connection_close(connection_, AMQP_REPLY_SUCCESS);
-error1:
-    amqp_destroy_connection(connection_);
     is_connected_ = false;
     return false;
 }
