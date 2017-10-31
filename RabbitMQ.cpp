@@ -8,6 +8,13 @@
 
 #include "RabbitMQ.h"
 
+// https://github.com/alanxz/rabbitmq-c/issues/211
+// Additionally: you should call amqp_maybe_release_buffers_on_channel() after consuming each message.
+//
+// 总体来说，rabbitmq-c内部的内存缓存，除非在发消息、收消息这种高频重复要主动调用
+// amqp_maybe_release_buffers(_on_channel)来主动释放防止占用过多内存，其他情况下
+// 调用这种函数收效甚微，而且在关闭的connection上调用该函数会crash
+// 所以目前的策略是：仅在成功操作的情况下主动调用该函数，防止库导致服务异常挂起
 
 namespace AMQP {
 
@@ -46,7 +53,7 @@ std::string RabbitMQHelper::brokerVersion() {
 amqp_channel_t RabbitMQHelper::createChannel() {
 	amqp_channel_t t;
 	if ( (t = getChannelId()) <= 0) {
-		printf("getChannelId failed!");
+		LOG_API("getChannelId failed!");
 		return -1;
 	}
 
@@ -58,7 +65,7 @@ amqp_channel_t RabbitMQHelper::createChannel() {
 	}
 
 	channels_[t] = pChannel;	// insert it!!
-	printf("created channel: %d", t);
+	LOG_API("created channel: %d", t);
 	return t;
 }
 
@@ -102,10 +109,13 @@ void RabbitMQHelper::closeConnection() {
 	if (!is_connected_)
         return;
 
+    is_connected_ = false;
+
     // 我们必须在这里强迫先析构Channel，然后才能析构connection_，否则
     // 顺序倒了会导致Channel析构的时候段错误 SIGSEGV
     //
-    // when connection close, close all channel.
+    // though when connection close, close all channel. though the lib did these implicity
+    //
     std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> >::iterator it;
     for (it=channels_.begin(); it!=channels_.end(); ++it) {
         if (it->second)
@@ -113,12 +123,10 @@ void RabbitMQHelper::closeConnection() {
     }
 
 	channels_.clear();
-    printf("Connection is closing...");
+    LOG_API("Connection is closing...");
 
 	amqp_connection_close(connection_, AMQP_REPLY_SUCCESS);
-	amqp_destroy_connection(connection_);
-
-    is_connected_ = false;
+	amqp_destroy_connection(connection_); //atomatically free resources
 }
 
 int RabbitMQHelper::checkAndRepairChannel(amqp_channel_t& channel,
@@ -128,7 +136,7 @@ int RabbitMQHelper::checkAndRepairChannel(amqp_channel_t& channel,
 
     if (!isConnectionOpen()) {
         if (!doConnect()) {
-            printf("Connect Failed!");
+            LOG_API("Connect Failed!");
             return -1;
         }
     }
@@ -137,13 +145,13 @@ int RabbitMQHelper::checkAndRepairChannel(amqp_channel_t& channel,
         freeChannel(channel);
         channel = createChannel();
         if (channel <= 0) {
-            printf("Create Channel Failed!");
+            LOG_API("Create Channel Failed!");
             return -1;
         }
 
         if (!setupChannel(channel, func, pArg)) {
             freeChannel(channel);
-            printf("Setup Channel Failed!");
+            LOG_API("Setup Channel Failed!");
             return -1;
         }
     }
@@ -219,12 +227,12 @@ int RabbitChannel::amqpErrorCheck(amqp_rpc_reply_t x, const char* context) {
             break;
 
         case AMQP_RESPONSE_NONE:
-            fprintf(stderr, "%s missing RPC reply type!\n", context);
+            LOG_API("%s missing RPC reply type!\n", context); // conn error
             break;
 
         case AMQP_RESPONSE_LIBRARY_EXCEPTION:
             // If we're getting this likely is the socket is already closed
-            fprintf(stderr, "%s: %s\n", context, amqp_error_string2(x.library_error));
+            LOG_API("%s: %s\n", context, amqp_error_string2(x.library_error));
             closeConnection();
             break;
 
@@ -232,35 +240,38 @@ int RabbitChannel::amqpErrorCheck(amqp_rpc_reply_t x, const char* context) {
             switch (x.reply.id) {
                 case AMQP_CONNECTION_CLOSE_METHOD: {
                     amqp_connection_close_t *m = (amqp_connection_close_t *) x.reply.decoded;
-                    fprintf(stderr, "%s: server connection error %uh, message: %.*s\n",
+                    LOG_API("%s: server connection error %uh, message: %.*s\n",
                             context,
                             m->reply_code,
                             (int) m->reply_text.len, (char *) m->reply_text.bytes);
 
-                    fprintf(stderr, "Close connection");
+                    LOG_API("Close connection");
                     closeConnection();
                     break;
                 }
 
                 case AMQP_CHANNEL_CLOSE_METHOD: {
                     amqp_channel_close_t *m = (amqp_channel_close_t *) x.reply.decoded;
-                    fprintf(stderr, "%s: server channel error %uh, message: %.*s\n",
+                    LOG_API("%s: server channel error %uh, message: %.*s\n",
                             context,
                             m->reply_code,
                             (int) m->reply_text.len, (char *) m->reply_text.bytes);
 
-                    fprintf(stderr, "Close channel: %d", id_);
+                    LOG_API("Close channel: %d", id_);
                     closeChannel();
                     break;
                 }
 
                 default: {
-                    fprintf(stderr, "%s: unknown server error, method id 0x%08X\n", context, x.reply.id);
+                    LOG_API("%s: unknown server error, method id 0x%08X\n", context, x.reply.id);
                     closeConnection();
                     break;
                 }
             }
-            break;
+			break;
+
+		default:
+			break;
     }
 
     return retCode;
@@ -277,17 +288,19 @@ int RabbitChannel::setConfirmSelect(){
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+		LOG_API("setConfirmSelect return with: %d", ret_code);
         return -1;
     }
 
     if (res.reply.id != AMQP_CONFIRM_SELECT_OK_METHOD) {
-        printf("expecting AMQP_CONFIRM_SELECT_OK_METHOD, but get reply.id: %d", res.reply.id);
+        LOG_API("expecting AMQP_CONFIRM_SELECT_OK_METHOD, but get reply.id: %d", res.reply.id);
         return -1;
     }
 
     is_publish_confirm_ = true;
-    printf("Channel will work in confirm mode...");
+    LOG_API("Channel will work in confirm mode...");
     return 0;
 }
 
@@ -316,7 +329,9 @@ int RabbitChannel::declareExchange(const std::string &exchange_name,
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_exchange_declare error with: %d", ret_code);
         return -1;
     }
 
@@ -335,7 +350,9 @@ int RabbitChannel::deleteExchange(const std::string &exchange_name,
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_exchange_delete error with: %d", ret_code);
         return -1;
     }
 
@@ -357,8 +374,9 @@ int RabbitChannel::bindExchange(const std::string &destination,
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_exchange_bind error with: %d", ret_code);
         return -1;
     }
 
@@ -381,8 +399,9 @@ int RabbitChannel::unbindExchange(const std::string &destination,
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_exchange_unbind error with: %d", ret_code);
         return -1;
     }
 
@@ -409,8 +428,9 @@ int RabbitChannel::declareQueue(const std::string &queue_name,
                                                     declare.exclusive, declare.auto_delete, amqp_empty_table);
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_queue_declare error with: %d", ret_code);
         return -1;
     }
 
@@ -435,8 +455,9 @@ int RabbitChannel::deleteQueue(const std::string &queue_name,
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_queue_delete error with: %d", ret_code);
         return -1;
     }
 
@@ -458,8 +479,9 @@ int RabbitChannel::bindQueue(const std::string &queue_name,
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_queue_bind error with: %d", ret_code);
         return -1;
     }
 
@@ -479,8 +501,9 @@ int RabbitChannel::unbindQueue(const std::string &queue_name,
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_queue_unbind error with: %d", ret_code);
         return -1;
     }
 
@@ -498,7 +521,9 @@ int RabbitChannel::purgeQueue(const std::string &queue_name) {
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_queue_purge error with: %d", ret_code);
         return -1;
     }
 
@@ -557,8 +582,10 @@ int RabbitChannel::basicNack(uint64_t delivery_tag, bool requeue, bool multiple 
 
 int RabbitChannel::basicQos(uint16_t message_prefetch_count, bool global_set) {
 
-    if (!isChannelOpen())
+    if (!isChannelOpen()){
+        LOG_API("channel is not open");
         return -1;
+    }
 
     amqp_basic_qos_t qos = {};
     qos.prefetch_size = 0;  // not implemented for RabbitMQ
@@ -566,15 +593,16 @@ int RabbitChannel::basicQos(uint16_t message_prefetch_count, bool global_set) {
     qos.global = global_set;
 
     if (qos.prefetch_count != 1) {
-        printf("Attention: qos.prefetch_count = %d", qos.prefetch_count);
+        LOG_API("Attention: qos.prefetch_count = %d", qos.prefetch_count);
     }
 
     amqp_basic_qos_ok_t *r = amqp_basic_qos(mqHelper_.connection_, id_, qos.prefetch_size, qos.prefetch_count, qos.global);
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_basic_qos error with: %d", ret_code);
         return -1;
     }
 
@@ -596,7 +624,6 @@ int RabbitChannel::basicCancel(const std::string &consumer_tag) {
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
     if( amqpErrorCheck(res) < 0) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
         return -1;
     }
 
@@ -618,8 +645,9 @@ int RabbitChannel::basicRecover(const std::string &consumer) {
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_basic_recover error with: %d", ret_code);
         return -1;
     }
 
@@ -638,6 +666,7 @@ int RabbitChannel::basicPublish(const std::string &exchange_name,
     message_bytes.bytes = (void *)(message.c_str());
     message_bytes.len = message.size();
 
+	//消息持久化的三要素之一:消息的投递模式为持久
     amqp_basic_properties_t props;
     props._flags = AMQP_BASIC_DELIVERY_MODE_FLAG;
     props.delivery_mode = 2; /* persistent delivery mode */
@@ -649,7 +678,7 @@ int RabbitChannel::basicPublish(const std::string &exchange_name,
                                  &props, message_bytes);
 
     if (retCode < 0) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+        LOG_API("amqp_basic_publish fail! ret:%d", retCode);
 		goto connection_err;
     }
 
@@ -663,7 +692,7 @@ int RabbitChannel::basicPublish(const std::string &exchange_name,
 
     amqp_frame_t frame;
     if (AMQP_STATUS_OK != amqp_simple_wait_frame(mqHelper_.connection_, &frame)) {
-        printf("publish ok, but confirm may fail!");
+        LOG_API("publish ok, but confirm may fail!");
 		goto connection_err;
     }
     if (frame.payload.method.id == AMQP_BASIC_ACK_METHOD) {
@@ -679,10 +708,10 @@ int RabbitChannel::basicPublish(const std::string &exchange_name,
             if (AMQP_RESPONSE_NORMAL == res.reply_type)
                 amqp_destroy_message(&message);
         }
-        printf("basic.return called!");
+        LOG_API("basic.return called!");
 		goto connection_err;
     } else {
-        printf("Unexpeced method.id: %d", frame.payload.method.id);
+        LOG_API("Unexpeced method.id: %d", frame.payload.method.id);
 		goto connection_err;
     }
 
@@ -717,18 +746,16 @@ int RabbitChannel::basicGet(RabbitMessage& rabbit_msg, const std::string &queue,
     if( amqpErrorCheck(res) < 0 ||
         res.reply_type == AMQP_RESPONSE_NONE ||
         AMQP_BASIC_GET_EMPTY_METHOD == res.reply.id) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
         goto error_out1;
     }
 
     if (res.reply.id != AMQP_BASIC_GET_OK_METHOD) {
-        printf("unexpeced reply.id: %d", res.reply.id);
+        LOG_API("unexpeced reply.id: %d", res.reply.id);
         goto error_out1;
     }
 
     get_ok = (amqp_basic_get_ok_t *)res.reply.decoded;
     if (!get_ok) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
         goto error_out1;
     }
 
@@ -740,7 +767,7 @@ int RabbitChannel::basicGet(RabbitMessage& rabbit_msg, const std::string &queue,
 
     if (amqp_bytes_malloc_dup_failed(rabbit_msg.envelope.exchange) ||
         amqp_bytes_malloc_dup_failed(rabbit_msg.envelope.routing_key)) {
-        yk_api::log_error("malloc failed!");
+        LOG_API("malloc failed!");
         goto error_out2;
     }
 
@@ -748,12 +775,12 @@ int RabbitChannel::basicGet(RabbitMessage& rabbit_msg, const std::string &queue,
     // check first frame header
     amqp_maybe_release_buffers(mqHelper_.connection_);
     if(amqp_simple_wait_frame(mqHelper_.connection_, &frame) != AMQP_STATUS_OK){
-        printf("wait for frame header error!");
+        LOG_API("wait for frame header error!");
         goto error_out2;
     }
 
     if (frame.frame_type != AMQP_FRAME_HEADER){
-        printf("expecting AMQP_FRAME_HEADER, but get: %d", frame.frame_type);
+        LOG_API("expecting AMQP_FRAME_HEADER, but get: %d", frame.frame_type);
         goto error_out2;
     }
 
@@ -769,19 +796,19 @@ int RabbitChannel::basicGet(RabbitMessage& rabbit_msg, const std::string &queue,
     } else {
         rabbit_msg.envelope.message.body = amqp_bytes_malloc(body_size);  // already set body.len
         if (!rabbit_msg.envelope.message.body.bytes) {
-            printf("malloc for message body failed!");
+            LOG_API("malloc for message body failed!");
             goto error_out3;
         }
     }
 
     while (received_size < body_size) {
         if(amqp_simple_wait_frame(mqHelper_.connection_, &frame) < 0){
-            printf("wait for frame header error!");
+            LOG_API("wait for frame header error!");
             goto error_out3;
         }
 
         if (frame.frame_type != AMQP_FRAME_BODY) {
-            printf("expecting AMQP_FRAME_BODY, but get: %d", frame.frame_type);
+            LOG_API("expecting AMQP_FRAME_BODY, but get: %d", frame.frame_type);
             goto error_out3;
         }
 
@@ -804,7 +831,6 @@ error_out2:
     amqp_bytes_free(rabbit_msg.envelope.exchange);
 
 error_out1:
-    amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
     return -1;
 }
 
@@ -828,8 +854,9 @@ int RabbitChannel::basicConsume(const std::string &queue,
     (void)r;
 
     amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-    if( amqpErrorCheck(res) < 0) {
-        amqp_maybe_release_buffers_on_channel(mqHelper_.connection_, id_);
+    int ret_code = amqpErrorCheck(res);
+    if( ret_code < 0 ) {
+        LOG_API("rabbitmq amqp_basic_consume error with: %d", ret_code);
         return -1;
     }
 
@@ -845,14 +872,15 @@ int RabbitMQHelper::basicConsumeMessage(RabbitMessage& rabbit_msg,
     amqp_rpc_reply_t ret;
     amqp_frame_t frame;
 
-    amqp_maybe_release_buffers(connection_);
     rabbit_msg.safe_clear();
     ret = amqp_consume_message(connection_, &rabbit_msg.envelope, timeout/*blocking*/, 0);
 
     // un-normal condition
     if (AMQP_RESPONSE_NORMAL != ret.reply_type) {
-        if (AMQP_RESPONSE_LIBRARY_EXCEPTION == ret.reply_type &&
-            AMQP_STATUS_UNEXPECTED_STATE == ret.library_error) {
+        if (AMQP_RESPONSE_LIBRARY_EXCEPTION == ret.reply_type && AMQP_STATUS_TIMEOUT == ret.library_error) {
+			return WAIT_MSG_TIMEOUT;
+		}
+		else if (AMQP_RESPONSE_LIBRARY_EXCEPTION == ret.reply_type && AMQP_STATUS_UNEXPECTED_STATE == ret.library_error) {
 
             if (AMQP_STATUS_OK != amqp_simple_wait_frame(connection_, &frame)) {
                 return -1;
@@ -893,8 +921,8 @@ int RabbitMQHelper::basicConsumeMessage(RabbitMessage& rabbit_msg,
                        * to the previous channel
                        */
 
-                        fprintf(stderr, "Close other channel: %d", frame.channel);
-						closeChannel(frame.channel);
+                        LOG_API("Close other channel: %d", frame.channel);
+                        closeChannel(frame.channel);
                         return -1;
 
                     case AMQP_CONNECTION_CLOSE_METHOD:
@@ -904,12 +932,12 @@ int RabbitMQHelper::basicConsumeMessage(RabbitMessage& rabbit_msg,
                        * In this case the whole connection must be restarted.
                        */
 
-                        fprintf(stderr, "Close connection");
+                        LOG_API("Close connection");
                         closeConnection();
                         return -1;
 
                     default:
-                        fprintf(stderr ,"An unexpected method was received %u\n", frame.payload.method.id);
+                        LOG_API("An unexpected method was received %u\n", frame.payload.method.id);
                         return -1;
                 } // switch
             } // AMQP_FRAME_METHOD
@@ -920,6 +948,7 @@ int RabbitMQHelper::basicConsumeMessage(RabbitMessage& rabbit_msg,
         rabbit_msg.touch();
     }
 
+    amqp_maybe_release_buffers(connection_);
     return 0;
 }
 
@@ -928,7 +957,7 @@ int RabbitMQHelper::basicConsumeMessage(RabbitMessage& rabbit_msg,
 bool RabbitMQHelper::doConnect() {
 
     if (connect_uris_.empty() || frame_max_ <= 0) {
-        printf("invalid argument!");
+        LOG_API("invalid argument!");
         return false;
     }
 
@@ -944,48 +973,48 @@ bool RabbitMQHelper::doConnect() {
 
 		char uri[2048] = {0, };
 		strncpy(uri, it->c_str(), sizeof(uri));
-		
+
 		if (amqp_parse_url(uri, &info) != 0) {
-				printf("prase connect_uri failed: %s", uri);
-				continue;
+			LOG_API("prase connect_uri failed: %s", uri);
+			continue;
 		}
 
 		connection_ = amqp_new_connection();
 		if (!connection_) {
-				printf("rabbitmq new connect error!");
-				continue;
+			LOG_API("rabbitmq new connect error!");
+			continue;
 		}
 
 		amqp_socket_t *socket = amqp_tcp_socket_new(connection_);
 		int sock = amqp_socket_open(socket, info.host, info.port);
 		if (sock < 0) {
-				printf("rabbitmq socket open error!");
-				amqp_destroy_connection(connection_);
-				continue;
+			LOG_API("rabbitmq socket open error!");
+			amqp_destroy_connection(connection_);
+			continue;
 		}
 
 		amqp_rpc_reply_t res = amqp_login(connection_, info.vhost, 0, frame_max_, 0,
 								 AMQP_SASL_METHOD_PLAIN, info.user, info.password);
 		if (AMQP_RESPONSE_NORMAL != res.reply_type) {
-			printf("rabbitmq login error!");
+			LOG_API("rabbitmq login error!");
 			amqp_connection_close(connection_, AMQP_REPLY_SUCCESS);
 			amqp_destroy_connection(connection_);
 			continue;
 		}
 
-		printf("rabbitmq client connect to %s:%d/%s ok!", info.host, info.port, info.vhost);
+		LOG_API("rabbitmq client connect to %s:%d/%s ok!", info.host, info.port, info.vhost);
 		is_connected_ = true;
 
 		max_channel_id_ = amqp_get_channel_max(connection_);
 		if (max_channel_id_ == 0 || max_channel_id_ > 2048 ) {
 			max_channel_id_ = 2048;
 		}
-		printf("current we support maxium channel: %d", max_channel_id_);
+		LOG_API("current we support maxium channel: %d", max_channel_id_);
 
 		return true;
     }
 
-    yk_api::log_error("We've tried %lu connection_uri, but failed!", connect_uris_.size());
+    LOG_API("We've tried %lu connection_uri, but failed!", connect_uris_.size());
 
     is_connected_ = false;
     return false;

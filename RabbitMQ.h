@@ -16,12 +16,15 @@
 #include <boost/shared_ptr.hpp>
 #include <boost/function.hpp>
 
+#define LOG_API printf
 
 // This object should not be shared among multi-threads
 
 namespace AMQP {
 
 static const char* NULL_CTX = "[NULL_CTX]";
+
+const int32_t WAIT_MSG_TIMEOUT = -0x1001;       //等待消息阻塞超时时间
 
 /**
  * 消息持久化的三要素：
@@ -88,7 +91,7 @@ public:
         connect_uris_.push_back(connect_uri);
 		channel_ids_.insert(0);
 
-        yk_api::log_trace("current connect_uri size: %lu", connect_uris_.size());
+        LOG_API("current connect_uri size: %lu", connect_uris_.size());
     }
 
     explicit RabbitMQHelper(const std::vector<std::string>& connect_uris, int frame_max = 131072 /*128K*/):
@@ -96,7 +99,7 @@ public:
         is_connected_(false) {
 		channel_ids_.insert(0);
 
-        yk_api::log_trace("current connect_uri size: %lu", connect_uris_.size());
+        LOG_API("current connect_uri size: %lu", connect_uris_.size());
     }
 
     ~RabbitMQHelper() {
@@ -204,15 +207,16 @@ public:
 
     int initChannel() {
         if (id_ <= 0) {
-            printf("rabbitmq channel invalid id: %d", id_);
+            LOG_API("rabbitmq channel invalid id: %d", id_);
             return -1;
         }
         amqp_channel_open_ok_t *r = amqp_channel_open(mqHelper_.connection_, id_);
 		(void)r;
 
         amqp_rpc_reply_t res = amqp_get_rpc_reply(mqHelper_.connection_);
-        if( amqpErrorCheck(res) < 0) {
-            printf("rabbitmq channel open error!");
+        int ret_code = amqpErrorCheck(res);
+        if( ret_code < 0 ) {
+            LOG_API("rabbitmq amqp_channel_open error with: %d", ret_code);
             return -1;
         }
         is_connected_ = true;
@@ -312,7 +316,7 @@ public:
 		if (!is_connected_)
 			return;
 
-		printf("Channel: %d close...", id_);
+		LOG_API("Channel: %d close...", id_);
 		amqp_channel_close(mqHelper_.connection_, id_, AMQP_REPLY_SUCCESS); // avoid multi call, only real destruct
 		is_connected_ = false;
     }
