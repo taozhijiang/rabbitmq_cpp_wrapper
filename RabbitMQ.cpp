@@ -57,7 +57,7 @@ amqp_channel_t RabbitMQHelper::createChannel() {
 		return -1;
 	}
 
-	boost::shared_ptr<RabbitChannel> pChannel;
+    std::shared_ptr<RabbitChannel> pChannel;
 	pChannel.reset(new RabbitChannel(t, *this));
 	if (!pChannel || pChannel->initChannel() < 0) {
 		freeChannelId(t);
@@ -70,7 +70,7 @@ amqp_channel_t RabbitMQHelper::createChannel() {
 }
 
 int RabbitMQHelper::closeChannel(amqp_channel_t channel){
-    std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> >::iterator it;
+    std::map<amqp_channel_t, std::shared_ptr<RabbitChannel> >::iterator it;
 
 	it = channels_.find(channel);
 	if (it == channels_.end()) {
@@ -82,7 +82,7 @@ int RabbitMQHelper::closeChannel(amqp_channel_t channel){
 }
 
 int RabbitMQHelper::freeChannel(amqp_channel_t channel) {
-	std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> >::iterator it;
+    std::map<amqp_channel_t, std::shared_ptr<RabbitChannel> >::iterator it;
 
 	it = channels_.find(channel);
 	if (it == channels_.end()) {
@@ -96,7 +96,7 @@ int RabbitMQHelper::freeChannel(amqp_channel_t channel) {
 }
 
 bool RabbitMQHelper::isChannelOpen(amqp_channel_t channel) {
-    std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> >::iterator it;
+    std::map<amqp_channel_t, std::shared_ptr<RabbitChannel> >::iterator it;
 	it = channels_.find(channel);
 	if (it == channels_.end())
         return false;
@@ -116,7 +116,7 @@ void RabbitMQHelper::closeConnection() {
     //
     // though when connection close, close all channel. though the lib did these implicity
     //
-    std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> >::iterator it;
+    std::map<amqp_channel_t, std::shared_ptr<RabbitChannel> >::iterator it;
     for (it=channels_.begin(); it!=channels_.end(); ++it) {
         if (it->second)
             it->second->closeChannel();
@@ -703,10 +703,10 @@ int RabbitChannel::basicPublish(const std::string &exchange_name,
          * wasn't routed to a queue, so the message is returned */
         // read the return message
         {
-            amqp_message_t message;
-            amqp_rpc_reply_t res = amqp_read_message(mqHelper_.connection_, frame.channel, &message, 0);
+            amqp_message_t message_dummy;
+            amqp_rpc_reply_t res = amqp_read_message(mqHelper_.connection_, frame.channel, &message_dummy, 0);
             if (AMQP_RESPONSE_NORMAL == res.reply_type)
-                amqp_destroy_message(&message);
+                amqp_destroy_message(&message_dummy);
         }
         LOG_API("basic.return called!");
 		goto connection_err;
@@ -843,7 +843,11 @@ int RabbitChannel::basicConsume(const std::string &queue,
 
     amqp_basic_consume_t consume = {};
     consume.queue = amqp_cstring_bytes(queue.c_str());
-    consume.consumer_tag = amqp_cstring_bytes(consumer_tag.c_str());
+    if (consumer_tag.empty() || consumer_tag == "*") {
+        consume.consumer_tag = amqp_empty_bytes;
+    } else {
+        consume.consumer_tag = amqp_cstring_bytes(consumer_tag.c_str());
+    }
     consume.no_local = no_local;
     consume.no_ack = no_ack;
     consume.exclusive = exclusive;

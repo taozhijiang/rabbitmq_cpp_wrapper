@@ -13,7 +13,7 @@
 #include <set>
 #include <map>
 
-#include <boost/shared_ptr.hpp>
+#include <memory>
 #include <boost/function.hpp>
 
 #define LOG_API printf
@@ -76,7 +76,7 @@ private:
 };
 
 
-typedef boost::shared_ptr<RabbitChannel> RabbitChannelPtr;
+typedef std::shared_ptr<RabbitChannel> RabbitChannelPtr;
 typedef boost::function<bool (RabbitChannelPtr, void*)> RabbitChannelSetupFunc;
 
 class RabbitMQHelper {
@@ -188,7 +188,7 @@ private:
 
 	amqp_channel_t max_channel_id_;
 	std::set<amqp_channel_t> channel_ids_;
-	std::map<amqp_channel_t, boost::shared_ptr<RabbitChannel> > channels_;
+    std::map<amqp_channel_t, std::shared_ptr<RabbitChannel> > channels_;
 };
 
 
