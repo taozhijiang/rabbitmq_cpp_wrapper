@@ -19,5 +19,9 @@ g++ -g -O0 -I./include/ -L./ -std=c++0x confirm_ack/batch_pub_confirm.cpp -o bat
 g++ -g -O0 -I./include/ -L./ -std=c++0x confirm_ack/cus_ack.cpp -o cus_ack RabbitMQ.o -lrabbitmq -lpthread -lrt || exit
 g++ -g -O0 -I./include/ -L./ -std=c++0x confirm_ack/cus_ack2.cpp -o cus_ack2 RabbitMQ.o -lrabbitmq -lpthread -lrt || exit
 
+echo "default_setup"
+g++ -g -O0 -I./include/ -L./ -std=c++0x default_setup/publish.cpp -o default_publish RabbitMQ.o -lrabbitmq -lpthread -lrt || exit
+g++ -g -O0 -I./include/ -L./ -std=c++0x default_setup/consume.cpp -o default_consume RabbitMQ.o -lrabbitmq -lpthread -lrt || exit
+
 
 echo "Done!"

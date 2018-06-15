@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <vector>
 #include <map>
+#include <boost/algorithm/string.hpp>
 
 #include "RabbitMQ.h"
 
@@ -1022,6 +1023,122 @@ bool RabbitMQHelper::doConnect() {
 
     is_connected_ = false;
     return false;
+}
+
+// connect: amqp://tibank:%s@127.0.0.1:5672/tibank_host; ...
+// passwd:  1234
+bool mq_parse_connect_uris(const std::string& uris, const std::string& passwd, std::vector<std::string>& conn_vec) {
+    
+	std::vector<std::string> vec;
+    boost::split(vec, uris, boost::is_any_of(";"));
+    for (std::vector<std::string>::iterator it = vec.begin(); it != vec.cend(); ++it){
+        std::string tmp = boost::trim_copy(*it);
+        if (tmp.empty())
+            continue;
+		
+        char connBuf[2048] = { 0, };
+        snprintf(connBuf, sizeof(connBuf), tmp.c_str(), passwd.c_str());
+        conn_vec.push_back(connBuf);
+    }
+
+    if (conn_vec.empty()) {
+        LOG_API("Invalid or empty MQ connect url");
+        return false;
+    }
+	
+	return true;
+}
+
+
+// 默认的生产者、消费者的通道配置函数
+bool mq_setup_channel_consume_default(RabbitChannelPtr pChannel, void* pArg) {
+
+    if (!pChannel) {
+        LOG_API("RabbitChannelPtr nullptr!");
+        return false;
+    }
+
+    if (!pArg) {
+        LOG_API("Empty pArg!");
+        return false;
+    }
+
+    rabbitmq_character_t* p_rabbitmq = static_cast<rabbitmq_character_t *>(pArg);
+    if (pChannel->declareExchange(p_rabbitmq->exchange_name_, "direct", false/*passive*/, true/*durable*/, false/*auto_delete*/) < 0) {
+        LOG_API("declareExchange %s Error!", p_rabbitmq->exchange_name_.c_str());
+        return false;
+    }
+
+    uint32_t msg_cnt = 0;
+    uint32_t cons_cnt = 0;
+    if (pChannel->declareQueue(p_rabbitmq->queue_name_, msg_cnt, cons_cnt, false/*passive*/, true/*durable*/, false/*exclusive*/, false/*auto_delete*/) < 0) {
+        LOG_API("Declare Queue %s Failed!", p_rabbitmq->queue_name_.c_str());
+        return false;
+    }
+
+    LOG_API("Broker report info: msg_cnt->%d, cons_cnt->%d", msg_cnt, cons_cnt);
+
+    // 路邮键 paybill
+    if (pChannel->bindQueue(p_rabbitmq->queue_name_, p_rabbitmq->exchange_name_, p_rabbitmq->route_key_)) {
+        LOG_API("bindExchange Error!");
+        return false;
+    }
+
+    if (pChannel->basicQos(1, true) < 0) {
+        LOG_API("basicQos Failed!");
+        return false;
+    }
+
+    if (pChannel->basicConsume(p_rabbitmq->queue_name_, "*", false/*no_local*/, false/*no_ack*/, false/*exclusive*/) < 0) {
+        LOG_API("BasicConosume queue %s Failed!", p_rabbitmq->queue_name_.c_str());
+        return false;
+    }
+
+    LOG_API("RabbitMQHandler init ok!");
+    return true;
+}
+
+
+bool mq_setup_channel_publish_default(RabbitChannelPtr pChannel, void* pArg) {
+
+    if (!pChannel) {
+        LOG_API("RabbitChannelPtr nullptr!");
+        return false;
+    }
+
+    if (!pArg) {
+        LOG_API("Empty pArg!");
+        return false;
+    }
+
+    rabbitmq_character_t* p_rabbitmq = static_cast<rabbitmq_character_t *>(pArg);
+    if (pChannel->declareExchange(p_rabbitmq->exchange_name_, "direct", false/*passive*/, true/*durable*/, false/*auto_delete*/) < 0) {
+        LOG_API("declareExchange %s Error!", p_rabbitmq->exchange_name_.c_str());
+        return false;
+    }
+
+    uint32_t msg_cnt = 0;
+    uint32_t cons_cnt = 0;
+    if (pChannel->declareQueue(p_rabbitmq->queue_name_, msg_cnt, cons_cnt, false/*passive*/, true/*durable*/, false/*exclusive*/, false/*auto_delete*/) < 0) {
+        LOG_API("Declare Queue %s Failed!", p_rabbitmq->queue_name_.c_str());
+        return false;
+    }
+
+    LOG_API("Broker report info: msg_cnt->%d, cons_cnt->%d", msg_cnt, cons_cnt);
+
+    // 路邮键 paybill
+    if (pChannel->bindQueue(p_rabbitmq->queue_name_, p_rabbitmq->exchange_name_, p_rabbitmq->route_key_)) {
+        LOG_API("bindExchange Error!");
+        return false;
+    }
+
+    if (pChannel->setConfirmSelect() < 0) {
+        std::cout << "Setting publish confirm failed!" << std::endl;
+        return false;
+    }
+
+    LOG_API("PbiRabbitMQHandler init ok!");
+    return true;
 }
 
 

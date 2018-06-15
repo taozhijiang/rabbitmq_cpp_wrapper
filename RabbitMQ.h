@@ -14,7 +14,7 @@
 #include <map>
 
 #include <memory>
-#include <boost/function.hpp>
+#include <functional>
 
 #define LOG_API printf
 
@@ -77,7 +77,7 @@ private:
 
 
 typedef std::shared_ptr<RabbitChannel> RabbitChannelPtr;
-typedef boost::function<bool (RabbitChannelPtr, void*)> RabbitChannelSetupFunc;
+typedef std::function<bool (RabbitChannelPtr, void*)> RabbitChannelSetupFunc;
 
 class RabbitMQHelper {
 
@@ -337,6 +337,16 @@ private:
     bool is_publish_confirm_;
 };
 
+
+struct rabbitmq_character_t {
+    std::string exchange_name_;
+    std::string queue_name_;
+    std::string route_key_;
+};
+
+bool mq_parse_connect_uris(const std::string& uris, const std::string& passwd, std::vector<std::string>& conn_vec);
+bool mq_setup_channel_publish_default(RabbitChannelPtr pChannel, void* pArg);
+bool mq_setup_channel_consume_default(RabbitChannelPtr pChannel, void* pArg);
 
 } // namespace AMQP
 

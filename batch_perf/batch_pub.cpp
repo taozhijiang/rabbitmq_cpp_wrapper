@@ -16,7 +16,7 @@ bool end = false;
 
 void* thread_run(void* arg) {
 
-    AMQP::RabbitMQHelper mq("amqp://paybank:paybank@127.0.0.1:5672/paybank");
+    AMQP::RabbitMQHelper mq("amqp://tibank:1234@127.0.0.1:5672/tibank_host");
     if (mq.doConnect() < 0) {
         std::cout << "Connect Error!" << std::endl;
         return NULL;

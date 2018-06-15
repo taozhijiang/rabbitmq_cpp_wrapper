@@ -57,9 +57,7 @@ int main(int argc, char* argv[]) {
 
     keyMask = ::atoi(argv[1]);
 
-    //AMQP::RabbitMQ mq("amqp://paybank:paybank@127.0.0.1:5672/paybank");
-    // sudo rabbitmqctl set_permissions -p paybank paybank ".*" ".*" ".*"
-    AMQP::RabbitMQHelper mq("amqp://paybank:paybank@127.0.0.1:5672/paybank");
+    AMQP::RabbitMQHelper mq("amqp://tibank:1234@127.0.0.1:5672/tibank_host");
     if (mq.doConnect() < 0) {
         std::cout << "Connect Error!" << std::endl;
         return -1;

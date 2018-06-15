@@ -9,21 +9,6 @@
 
 #include "../RabbitMQ.h"
 
-bool setupChannel(AMQP::RabbitChannelPtr pChannel, void* pArg) {
-
-	if (!pChannel) {
-		std::cout << "nullptr Error!" << std::endl;
-		return false;
-	}
-
-    if (pChannel->setConfirmSelect() < 0) {
-        std::cout << "Setting publish confirm failed!" << std::endl;
-        return false;
-    }
-
-	return true;
-}
-
 
 int main(int argc, char* argv[]) {
 
@@ -41,14 +26,21 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    if (mq.setupChannel(t, setupChannel, NULL) < 0) {
+    AMQP::rabbitmq_character_t character {};
+    character.exchange_name_ = "hello-exchange";
+    character.queue_name_ = "hello-queue";
+    character.route_key_ = "hello-key";
+
+    if (mq.setupChannel(t, 
+                std::bind(AMQP::mq_setup_channel_publish_default, std::placeholders::_1, std::placeholders::_2), 
+                &character) < 0) {
         std::cout << "Setup channel failed!" << std::endl;
 		mq.freeChannel(t);
         return -1;
     }
 
     std::stringstream msg;
-    msg << "桃子最帅+:" << ::rand() % 1000000;
+    msg << "default_publish桃子最帅+:" << ::rand() % 1000000;
 
     if(mq.basicPublish(t, "hello-exchange", "*", true/* mandatory */, false/* immediate */, msg.str()) < 0) {
         std::cout << "publis error!" << std::endl;
